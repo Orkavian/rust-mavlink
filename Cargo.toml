@@ -1,5 +1,5 @@
 [workspace]
-members = ["mavlink", "mavlink-bindgen", "mavlink-core"]
+members = ["mavlink", "mavlink-bindgen", "mavlink-core", "mavlink-crc"]
 resolver = "1"
 
 [workspace.dependencies]

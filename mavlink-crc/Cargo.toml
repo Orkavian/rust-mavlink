@@ -1,0 +1,17 @@
+[package]
+name = "mavlink-crc"
+version = "0.1.0"
+license = "MIT/Apache-2.0"
+repository = "https://github.com/mavlink/rust-mavlink"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["std"]
+std = []
+
+[lints]
+workspace = true

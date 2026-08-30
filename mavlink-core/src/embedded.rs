@@ -1,21 +1,18 @@
 use crate::error::*;
 
-/// Replacement for std::io::Read + byteorder::ReadBytesExt in no_std envs
+/// `no_std` counterpart to [`std::io::Read`].
 pub trait Read {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, MessageReadError> {
-        self.read_exact(buf).map(|_| buf.len())
-    }
-
-    fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), MessageReadError>;
+    /// Read some bytes without waiting to fill the entire destination.
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, MessageReadError>;
 }
 
 impl<R: embedded_io::Read> Read for R {
-    fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), MessageReadError> {
-        embedded_io::Read::read_exact(self, buf).map_err(|_| MessageReadError::Io)
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, MessageReadError> {
+        embedded_io::Read::read(self, buf).map_err(|_| MessageReadError::Io)
     }
 }
 
-/// Replacement for std::io::Write + byteorder::WriteBytesExt in no_std envs
+/// `no_std` counterpart to [`std::io::Write`].
 pub trait Write {
     fn write_all(&mut self, buf: &[u8]) -> Result<(), MessageWriteError>;
 }

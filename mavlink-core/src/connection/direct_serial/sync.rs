@@ -1,13 +1,13 @@
 //! Serial MAVLINK connection
 
 use crate::Connectable;
+use crate::MavlinkReader;
 use crate::connection::{Connection, MavConnection};
 use crate::connection_shared::{
     ConnectionState, next_atomic_send_header, read_message, read_raw_message, write_message,
     write_raw_message,
 };
 use crate::error::{MessageReadError, MessageWriteError};
-use crate::peek_reader::PeekReader;
 use crate::{MAVLinkMessageRaw, MavHeader, MavlinkVersion, Message};
 use core::ops::DerefMut;
 use core::sync::atomic::AtomicU8;
@@ -25,7 +25,7 @@ use super::config::SerialConfig;
 pub struct SerialConnection {
     // Separate ports for reading and writing as it's safe to use concurrently.
     // See the official ref: https://github.com/serialport/serialport-rs/blob/321f85e1886eaa1302aef8a600a631bc1c88703a/examples/duplex.rs
-    read_port: Mutex<PeekReader<BufReader<Box<dyn SerialPort>>>>,
+    read_port: Mutex<MavlinkReader<BufReader<Box<dyn SerialPort>>>>,
     write_port: Mutex<Box<dyn SerialPort>>,
     sequence: AtomicU8,
     state: ConnectionState,
@@ -121,7 +121,7 @@ impl Connectable for SerialConfig {
         let buf_reader = BufReader::with_capacity(read_buffer_capacity, read_port);
 
         Ok(SerialConnection {
-            read_port: Mutex::new(PeekReader::new(buf_reader)),
+            read_port: Mutex::new(MavlinkReader::new(buf_reader)),
             write_port: Mutex::new(write_port),
             sequence: AtomicU8::new(0),
             state: ConnectionState::new(),

@@ -17,7 +17,7 @@ use crate::connection_shared::{
     ConnectionState, next_send_header, read_message_async, read_raw_message_async,
     write_message_async, write_raw_message_async,
 };
-use crate::{MavHeader, MavlinkVersion, Message, async_peek_reader::AsyncPeekReader};
+use crate::{AsyncMavlinkReader, MavHeader, MavlinkVersion, Message};
 
 use crate::connection::{AsyncConnectable, AsyncMavConnection, get_socket_addr};
 
@@ -111,7 +111,7 @@ impl AsyncWrite for UdpWrite {
 }
 
 pub struct AsyncUdpConnection {
-    reader: Mutex<AsyncPeekReader<UdpRead>>,
+    reader: Mutex<AsyncMavlinkReader<UdpRead>>,
     writer: Mutex<UdpWrite>,
     state: ConnectionState,
     server: bool,
@@ -126,7 +126,7 @@ impl AsyncUdpConnection {
         let socket = Arc::new(socket);
         Ok(Self {
             server,
-            reader: Mutex::new(AsyncPeekReader::new(UdpRead {
+            reader: Mutex::new(AsyncMavlinkReader::new(UdpRead {
                 socket: socket.clone(),
                 buffer: VecDeque::new(),
                 last_recv_address: None,
@@ -140,9 +140,9 @@ impl AsyncUdpConnection {
         })
     }
 
-    async fn update_reply_destination(&self, reader: &mut AsyncPeekReader<UdpRead>) {
+    async fn update_reply_destination(&self, reader: &mut AsyncMavlinkReader<UdpRead>) {
         if self.server {
-            if let addr @ Some(_) = reader.reader_ref().last_recv_address {
+            if let addr @ Some(_) = reader.get_ref().last_recv_address {
                 self.writer.lock().await.dest = addr;
             }
         }

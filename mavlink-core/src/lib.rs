@@ -22,7 +22,7 @@
 //!
 //! # Read Functions
 //!
-//! The `read_*` functions can be used to read a MAVLink message for a [`PeekReader`] wrapping a `[Read]`er.
+//! The `read_*` functions can be used to read MAVLink messages from a [`MavlinkReader`].
 //!
 //! They follow the pattern `read_(v1|v2|any|versioned)_(raw_message|msg)[_async][_signed]<M, _>(..)`.
 //! All read functions check for a valid `STX` marker of the corresponding MAVLink version and verify that the message CRC checksum is correct.
@@ -39,7 +39,7 @@
 //! - `versioned` functions read messages of the version specified in an aditional `version` parameter
 //! - `raw_message` functions return an unparsed message as [`MAVLinkV1MessageRaw`], [`MAVLinkV2MessageRaw`] or [`MAVLinkMessageRaw`]
 //! - `msg` functions return a parsed message as a tupel of [`MavHeader`] and the `Message` of the specified dialect
-//! - `_async` functions, which are only enabled with the `tokio` feature, are [async](https://doc.rust-lang.org/std/keyword.async.html) and read from an [`AsyncPeekReader`] instead.
+//! - `_async` functions, which are only enabled with the `tokio` feature, are [async](https://doc.rust-lang.org/std/keyword.async.html) and read from an [`AsyncMavlinkReader`] instead.
 //! - `_signed` functions, which are only enabled with the `mav2-message-signing` feature, have an `Option<&SigningData>` parameter that allows the use of MAVLink 2 message signing.
 //!   MAVLink 1 exclusive functions do not have a `_signed` variant and functions that allow both MAVLink 1 and 2 messages treat MAVLink 1 messages as unsigned.
 //!   When an invalidly signed message is received it is ignored.
@@ -73,8 +73,8 @@
 //!   [`Interrupted`] the function returns [`MessageWriteError::Io`]
 //! - When attempting to serialize a message with an ID over 255 with MAVLink 1 a [`MessageWriteError::MAVLink2Only`] is returned
 //!
-//! [`PeekReader`]: peek_reader::PeekReader
-//! [`AsyncPeekReader`]: async_peek_reader::AsyncPeekReader
+//! [`MavlinkReader`]: crate::MavlinkReader
+//! [`AsyncMavlinkReader`]: crate::AsyncMavlinkReader
 //! [`UnexpectedEof`]: std::io::ErrorKind::UnexpectedEof
 //! [`AsyncRead`]: tokio::io::AsyncRead
 //! [`AsyncWrite`]: tokio::io::AsyncWrite
@@ -96,8 +96,13 @@ use utils::{RustDefault, remove_trailing_zeroes};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-pub mod peek_reader;
-use peek_reader::PeekReader;
+mod frame_decoder;
+pub use frame_decoder::{
+    CommitError, DecodeProgress, DecodeStatus, FrameDecoder as MavlinkDecoder, FrameRef,
+    FrameVersion, MAX_FRAME_LEN, Rejections,
+};
+mod reader;
+pub use reader::MavlinkReader;
 
 use crate::error::{BufferError, MessageReadError, MessageWriteError, ParserError};
 #[cfg(any(feature = "std", feature = "tokio"))]
@@ -111,10 +116,10 @@ pub use self::connection::{Connectable, Connection, MavConnection, connect};
 #[cfg(feature = "tokio")]
 pub use self::connection::{AsyncConnectable, AsyncMavConnection, connect_async};
 
-#[cfg(feature = "tokio")]
-pub mod async_peek_reader;
-#[cfg(feature = "tokio")]
-use async_peek_reader::AsyncPeekReader;
+#[cfg(any(feature = "tokio", all(feature = "embedded", not(feature = "std"))))]
+mod async_reader;
+#[cfg(any(feature = "tokio", all(feature = "embedded", not(feature = "std"))))]
+pub use async_reader::AsyncMavlinkReader;
 #[cfg(feature = "tokio")]
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -405,81 +410,57 @@ impl From<MavlinkVersion> for ReadVersion {
     }
 }
 
-/// Read and parse a MAVLink message of the specified version from a [`PeekReader`].
+/// Read and parse a MAVLink message of the specified version from a [`MavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 pub fn read_versioned_msg<M: Message, R: Read>(
-    r: &mut PeekReader<R>,
+    reader: &mut MavlinkReader<R>,
     version: ReadVersion,
 ) -> Result<(MavHeader, M), MessageReadError> {
-    match version {
-        ReadVersion::Single(MavlinkVersion::V2) => read_v2_msg(r),
-        ReadVersion::Single(MavlinkVersion::V1) => read_v1_msg(r),
-        ReadVersion::Any => read_any_msg(r),
-    }
+    reader.read_message::<M>(version)
 }
 
-/// Read and parse a MAVLink message of the specified version from a [`PeekReader`].
+/// Read and parse a MAVLink message of the specified version from a [`MavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 pub fn read_versioned_raw_message<M: Message, R: Read>(
-    r: &mut PeekReader<R>,
+    reader: &mut MavlinkReader<R>,
     version: ReadVersion,
 ) -> Result<MAVLinkMessageRaw, MessageReadError> {
-    match version {
-        ReadVersion::Single(MavlinkVersion::V2) => {
-            Ok(MAVLinkMessageRaw::V2(read_v2_raw_message::<M, _>(r)?))
-        }
-        ReadVersion::Single(MavlinkVersion::V1) => {
-            Ok(MAVLinkMessageRaw::V1(read_v1_raw_message::<M, _>(r)?))
-        }
-        ReadVersion::Any => read_any_raw_message::<M, _>(r),
-    }
+    reader.read_raw_message::<M>(version)
 }
 
-/// Asynchronously read and parse a MAVLink message of the specified version from a [`AsyncPeekReader`].
+/// Asynchronously read and parse a MAVLink message of the specified version from a [`AsyncMavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 #[cfg(feature = "tokio")]
 pub async fn read_versioned_msg_async<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    r: &mut AsyncPeekReader<R>,
+    reader: &mut AsyncMavlinkReader<R>,
     version: ReadVersion,
 ) -> Result<(MavHeader, M), MessageReadError> {
-    match version {
-        ReadVersion::Single(MavlinkVersion::V2) => read_v2_msg_async(r).await,
-        ReadVersion::Single(MavlinkVersion::V1) => read_v1_msg_async(r).await,
-        ReadVersion::Any => read_any_msg_async(r).await,
-    }
+    reader.read_message::<M>(version).await
 }
 
-/// Asynchronously read and parse a MAVLinkMessageRaw of the specified version from a [`AsyncPeekReader`].
+/// Asynchronously read and parse a MAVLinkMessageRaw of the specified version from a [`AsyncMavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 #[cfg(feature = "tokio")]
 pub async fn read_versioned_raw_message_async<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    r: &mut AsyncPeekReader<R>,
+    reader: &mut AsyncMavlinkReader<R>,
     version: ReadVersion,
 ) -> Result<MAVLinkMessageRaw, MessageReadError> {
-    match version {
-        ReadVersion::Single(MavlinkVersion::V2) => Ok(MAVLinkMessageRaw::V2(
-            read_v2_raw_message_async::<M, _>(r).await?,
-        )),
-        ReadVersion::Single(MavlinkVersion::V1) => Ok(MAVLinkMessageRaw::V1(
-            read_v1_raw_message_async::<M, _>(r).await?,
-        )),
-        ReadVersion::Any => read_any_raw_message_async::<M, _>(r).await,
-    }
+    reader.read_raw_message::<M>(version).await
 }
 
-/// Read and parse a MAVLinkMessageRaw of the specified version from a [`PeekReader`] with signing support.
+/// Read and parse a MAVLinkMessageRaw of the specified version from a [`MavlinkReader`] with signing support.
 ///
 /// When using [`ReadVersion::Single`]`(`[`MavlinkVersion::V1`]`)` signing is ignored.
 /// When using [`ReadVersion::Any`] MAVlink 1 messages are treated as unsigned.
@@ -489,22 +470,14 @@ pub async fn read_versioned_raw_message_async<M: Message, R: tokio::io::AsyncRea
 /// See [`read_` function error documentation](crate#read-errors)
 #[cfg(feature = "mav2-message-signing")]
 pub fn read_versioned_raw_message_signed<M: Message, R: Read>(
-    r: &mut PeekReader<R>,
+    reader: &mut MavlinkReader<R>,
     version: ReadVersion,
     signing_data: Option<&SigningData>,
 ) -> Result<MAVLinkMessageRaw, MessageReadError> {
-    match version {
-        ReadVersion::Single(MavlinkVersion::V2) => Ok(MAVLinkMessageRaw::V2(
-            read_v2_raw_message_inner::<M, _>(r, signing_data)?,
-        )),
-        ReadVersion::Single(MavlinkVersion::V1) => {
-            Ok(MAVLinkMessageRaw::V1(read_v1_raw_message::<M, _>(r)?))
-        }
-        ReadVersion::Any => read_any_raw_message_inner::<M, _>(r, signing_data),
-    }
+    reader.read_raw_message_inner::<M>(version, signing_data)
 }
 
-/// Read and parse a MAVLink message of the specified version from a [`PeekReader`] with signing support.
+/// Read and parse a MAVLink message of the specified version from a [`MavlinkReader`] with signing support.
 ///
 /// When using [`ReadVersion::Single`]`(`[`MavlinkVersion::V1`]`)` signing is ignored.
 /// When using [`ReadVersion::Any`] MAVlink 1 messages are treated as unsigned.
@@ -514,18 +487,14 @@ pub fn read_versioned_raw_message_signed<M: Message, R: Read>(
 /// See [`read_` function error documentation](crate#read-errors)
 #[cfg(feature = "mav2-message-signing")]
 pub fn read_versioned_msg_signed<M: Message, R: Read>(
-    r: &mut PeekReader<R>,
+    reader: &mut MavlinkReader<R>,
     version: ReadVersion,
     signing_data: Option<&SigningData>,
 ) -> Result<(MavHeader, M), MessageReadError> {
-    match version {
-        ReadVersion::Single(MavlinkVersion::V2) => read_v2_msg_inner(r, signing_data),
-        ReadVersion::Single(MavlinkVersion::V1) => read_v1_msg(r),
-        ReadVersion::Any => read_any_msg_inner(r, signing_data),
-    }
+    reader.read_message_inner::<M>(version, signing_data)
 }
 
-/// Asynchronously read and parse a MAVLinkMessageRaw of the specified version from a [`AsyncPeekReader`] with signing support.
+/// Asynchronously read and parse a MAVLinkMessageRaw of the specified version from a [`AsyncMavlinkReader`] with signing support.
 ///
 /// When using [`ReadVersion::Single`]`(`[`MavlinkVersion::V1`]`)` signing is ignored.
 /// When using [`ReadVersion::Any`] MAVlink 1 messages are treated as unsigned.
@@ -538,22 +507,16 @@ pub async fn read_versioned_raw_message_async_signed<
     M: Message,
     R: tokio::io::AsyncRead + Unpin,
 >(
-    r: &mut AsyncPeekReader<R>,
+    reader: &mut AsyncMavlinkReader<R>,
     version: ReadVersion,
     signing_data: Option<&SigningData>,
 ) -> Result<MAVLinkMessageRaw, MessageReadError> {
-    match version {
-        ReadVersion::Single(MavlinkVersion::V2) => Ok(MAVLinkMessageRaw::V2(
-            read_v2_raw_message_async_inner::<M, _>(r, signing_data).await?,
-        )),
-        ReadVersion::Single(MavlinkVersion::V1) => Ok(MAVLinkMessageRaw::V1(
-            read_v1_raw_message_async::<M, _>(r).await?,
-        )),
-        ReadVersion::Any => read_any_raw_message_async_inner::<M, _>(r, signing_data).await,
-    }
+    reader
+        .read_raw_message_inner::<M>(version, signing_data)
+        .await
 }
 
-/// Asynchronously read and parse a MAVLink message of the specified version from a [`AsyncPeekReader`] with signing support.
+/// Asynchronously read and parse a MAVLink message of the specified version from a [`AsyncMavlinkReader`] with signing support.
 ///
 /// When using [`ReadVersion::Single`]`(`[`MavlinkVersion::V1`]`)` signing is ignored.
 /// When using [`ReadVersion::Any`] MAVlink 1 messages are treated as unsigned.
@@ -563,15 +526,11 @@ pub async fn read_versioned_raw_message_async_signed<
 /// See [`read_` function error documentation](crate#read-errors)
 #[cfg(all(feature = "tokio", feature = "mav2-message-signing"))]
 pub async fn read_versioned_msg_async_signed<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    r: &mut AsyncPeekReader<R>,
+    reader: &mut AsyncMavlinkReader<R>,
     version: ReadVersion,
     signing_data: Option<&SigningData>,
 ) -> Result<(MavHeader, M), MessageReadError> {
-    match version {
-        ReadVersion::Single(MavlinkVersion::V2) => read_v2_msg_async_inner(r, signing_data).await,
-        ReadVersion::Single(MavlinkVersion::V1) => read_v1_msg_async(r).await,
-        ReadVersion::Any => read_any_msg_async_inner(r, signing_data).await,
-    }
+    reader.read_message_inner::<M>(version, signing_data).await
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -677,6 +636,7 @@ impl MAVLinkV1MessageRaw {
     }
 
     #[inline]
+    #[cfg(all(feature = "embedded", not(feature = "std")))]
     fn mut_payload_and_checksum(&mut self) -> &mut [u8] {
         let payload_length: usize = self.payload_length().into();
         let payload_offset = consts::STX_SIZE + consts::v1::HEADER_SIZE;
@@ -763,100 +723,35 @@ impl MAVLinkV1MessageRaw {
     }
 }
 
-fn try_decode_v1<M: Message, R: Read>(
-    reader: &mut PeekReader<R>,
-) -> Result<Option<MAVLinkV1MessageRaw>, MessageReadError> {
-    let mut message = MAVLinkV1MessageRaw::new();
-    let whole_header_size = consts::STX_SIZE + consts::v1::HEADER_SIZE;
-
-    message.0[consts::STX_OFFSET] = MAV_STX;
-    let header = &reader.peek_exact(whole_header_size)?[consts::STX_SIZE..whole_header_size];
-    message.mut_header().copy_from_slice(header);
-    let packet_length = message.raw_bytes().len();
-    let payload_and_checksum = &reader.peek_exact(packet_length)?[whole_header_size..packet_length];
-    message
-        .mut_payload_and_checksum()
-        .copy_from_slice(payload_and_checksum);
-
-    // retry if CRC failed after previous STX
-    // (an STX byte may appear in the middle of a message)
-    if message.has_valid_crc::<M>() {
-        reader.consume(message.raw_bytes().len());
-        Ok(Some(message))
-    } else {
-        Ok(None)
-    }
-}
-
-#[cfg(feature = "tokio")]
-// other then the blocking version the STX is read not peeked, this changed some sizes
-async fn try_decode_v1_async<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut AsyncPeekReader<R>,
-) -> Result<Option<MAVLinkV1MessageRaw>, MessageReadError> {
-    let mut message = MAVLinkV1MessageRaw::new();
-
-    message.0[consts::STX_OFFSET] = MAV_STX;
-    let header = &reader.peek_exact(consts::v1::HEADER_SIZE).await?[..consts::v1::HEADER_SIZE];
-    message.mut_header().copy_from_slice(header);
-    let packet_length = message.raw_bytes().len() - consts::STX_SIZE;
-    let payload_and_checksum =
-        &reader.peek_exact(packet_length).await?[consts::v1::HEADER_SIZE..packet_length];
-    message
-        .mut_payload_and_checksum()
-        .copy_from_slice(payload_and_checksum);
-
-    // retry if CRC failed after previous STX
-    // (an STX byte may appear in the middle of a message)
-    if message.has_valid_crc::<M>() {
-        reader.consume(message.raw_bytes().len() - consts::STX_SIZE);
-        Ok(Some(message))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Read a raw MAVLink 1 message from a [`PeekReader`].
+/// Read a raw MAVLink 1 message from a [`MavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 pub fn read_v1_raw_message<M: Message, R: Read>(
-    reader: &mut PeekReader<R>,
+    reader: &mut MavlinkReader<R>,
 ) -> Result<MAVLinkV1MessageRaw, MessageReadError> {
-    loop {
-        // search for the magic framing value indicating start of mavlink message
-        while reader.peek_exact(consts::STX_SIZE)?[consts::STX_OFFSET] != MAV_STX {
-            reader.consume(consts::STX_SIZE);
-        }
-
-        if let Some(msg) = try_decode_v1::<M, _>(reader)? {
-            return Ok(msg);
-        }
-
-        reader.consume(consts::STX_SIZE);
+    match reader.read_raw_message::<M>(ReadVersion::Single(MavlinkVersion::V1))? {
+        MAVLinkMessageRaw::V1(message) => Ok(message),
+        MAVLinkMessageRaw::V2(_) => unreachable!("the reader was restricted to MAVLink 1"),
     }
 }
 
-/// Asynchronously read a raw MAVLink 1 message from a [`AsyncPeekReader`].
+/// Asynchronously read a raw MAVLink 1 message from an [`AsyncMavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 #[cfg(feature = "tokio")]
 pub async fn read_v1_raw_message_async<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut AsyncPeekReader<R>,
+    reader: &mut AsyncMavlinkReader<R>,
 ) -> Result<MAVLinkV1MessageRaw, MessageReadError> {
-    loop {
-        loop {
-            // search for the magic framing value indicating start of mavlink message
-            if reader.read_u8().await? == MAV_STX {
-                break;
-            }
-        }
-
-        if let Some(message) = try_decode_v1_async::<M, _>(reader).await? {
-            return Ok(message);
-        }
+    match reader
+        .read_raw_message::<M>(ReadVersion::Single(MavlinkVersion::V1))
+        .await?
+    {
+        MAVLinkMessageRaw::V1(message) => Ok(message),
+        MAVLinkMessageRaw::V2(_) => unreachable!("the reader was restricted to MAVLink 1"),
     }
 }
 
@@ -903,53 +798,29 @@ pub async fn read_v1_raw_message_async<M: Message>(
     }
 }
 
-/// Read and parse a MAVLink 1 message from a [`PeekReader`].
+/// Read and parse a MAVLink 1 message from a [`MavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 pub fn read_v1_msg<M: Message, R: Read>(
-    r: &mut PeekReader<R>,
+    reader: &mut MavlinkReader<R>,
 ) -> Result<(MavHeader, M), MessageReadError> {
-    let message = read_v1_raw_message::<M, _>(r)?;
-
-    Ok((
-        MavHeader {
-            sequence: message.sequence(),
-            system_id: message.system_id(),
-            component_id: message.component_id(),
-        },
-        M::parse(
-            MavlinkVersion::V1,
-            u32::from(message.message_id()),
-            message.payload(),
-        )?,
-    ))
+    reader.read_message::<M>(ReadVersion::Single(MavlinkVersion::V1))
 }
 
-/// Asynchronously read and parse a MAVLink 1 message from a [`AsyncPeekReader`].
+/// Asynchronously read and parse a MAVLink 1 message from an [`AsyncMavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 #[cfg(feature = "tokio")]
 pub async fn read_v1_msg_async<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    r: &mut AsyncPeekReader<R>,
+    reader: &mut AsyncMavlinkReader<R>,
 ) -> Result<(MavHeader, M), MessageReadError> {
-    let message = read_v1_raw_message_async::<M, _>(r).await?;
-
-    Ok((
-        MavHeader {
-            sequence: message.sequence(),
-            system_id: message.system_id(),
-            component_id: message.component_id(),
-        },
-        M::parse(
-            MavlinkVersion::V1,
-            u32::from(message.message_id()),
-            message.payload(),
-        )?,
-    ))
+    reader
+        .read_message::<M>(ReadVersion::Single(MavlinkVersion::V1))
+        .await
 }
 
 /// Asynchronously read and parse a MAVLink 1 message from a [`embedded_io_async::Read`]er.
@@ -1200,6 +1071,7 @@ impl MAVLinkV2MessageRaw {
         &mut self.0[signature_start..(signature_start + consts::v2::SIGNATURE_VALUE_SIZE)]
     }
 
+    #[cfg(all(feature = "embedded", not(feature = "std")))]
     fn mut_payload_and_checksum_and_sign(&mut self) -> &mut [u8] {
         let payload_length: usize = self.payload_length().into();
 
@@ -1341,103 +1213,22 @@ impl MAVLinkV2MessageRaw {
 }
 
 #[allow(unused_variables)]
-fn try_decode_v2<M: Message, R: Read>(
-    reader: &mut PeekReader<R>,
-    signing_data: Option<&SigningData>,
-) -> Result<Option<MAVLinkV2MessageRaw>, MessageReadError> {
-    let mut message = MAVLinkV2MessageRaw::new();
-    let whole_header_size = consts::STX_SIZE + consts::v2::HEADER_SIZE;
-
-    message.0[consts::STX_OFFSET] = MAV_STX_V2;
-    let header = &reader.peek_exact(whole_header_size)?[consts::STX_SIZE..whole_header_size];
-    message.mut_header().copy_from_slice(header);
-
-    if message.incompatibility_flags() & !consts::v2::SUPPORTED_IFLAGS > 0 {
-        // if there are incompatibility flags set that we do not know discard the message
-        reader.consume(consts::STX_SIZE);
-        return Ok(None);
-    }
-
-    let packet_length = message.raw_bytes().len();
-    let payload_and_checksum_and_sign =
-        &reader.peek_exact(packet_length)?[whole_header_size..packet_length];
-    message
-        .mut_payload_and_checksum_and_sign()
-        .copy_from_slice(payload_and_checksum_and_sign);
-
-    if message.has_valid_crc::<M>() {
-        // even if the signature turn out to be invalid the valid crc shows that the received data presents a valid message as opposed to random bytes
-        reader.consume(message.raw_bytes().len());
-    } else {
-        reader.consume(consts::STX_SIZE);
-        return Ok(None);
-    }
-
-    #[cfg(feature = "mav2-message-signing")]
-    if let Some(signing_data) = signing_data {
-        if !signing_data.verify_signature(&message) {
-            return Ok(None);
-        }
-    }
-
-    Ok(Some(message))
-}
-
-#[cfg(feature = "tokio")]
-#[allow(unused_variables)]
-// other then the blocking version the STX is read not peeked, this changed some sizes
-async fn try_decode_v2_async<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut AsyncPeekReader<R>,
-    signing_data: Option<&SigningData>,
-) -> Result<Option<MAVLinkV2MessageRaw>, MessageReadError> {
-    let mut message = MAVLinkV2MessageRaw::new();
-
-    message.0[consts::STX_OFFSET] = MAV_STX_V2;
-    let header = &reader.peek_exact(consts::v2::HEADER_SIZE).await?[..consts::v2::HEADER_SIZE];
-    message.mut_header().copy_from_slice(header);
-
-    if message.incompatibility_flags() & !consts::v2::SUPPORTED_IFLAGS > 0 {
-        // if there are incompatibility flags set that we do not know discard the message
-        return Ok(None);
-    }
-
-    let packet_length = message.raw_bytes().len() - consts::STX_SIZE;
-    let payload_and_checksum_and_sign =
-        &reader.peek_exact(packet_length).await?[consts::v2::HEADER_SIZE..packet_length];
-    message
-        .mut_payload_and_checksum_and_sign()
-        .copy_from_slice(payload_and_checksum_and_sign);
-
-    if message.has_valid_crc::<M>() {
-        // even if the signature turn out to be invalid the valid crc shows that the received data presents a valid message as opposed to random bytes
-        reader.consume(message.raw_bytes().len() - consts::STX_SIZE);
-    } else {
-        return Ok(None);
-    }
-
-    #[cfg(feature = "mav2-message-signing")]
-    if let Some(signing_data) = signing_data {
-        if !signing_data.verify_signature(&message) {
-            return Ok(None);
-        }
-    }
-
-    Ok(Some(message))
-}
-
-/// Read a raw MAVLink 2 message from a [`PeekReader`].
+/// Read a raw MAVLink 2 message from a [`MavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 #[inline]
 pub fn read_v2_raw_message<M: Message, R: Read>(
-    reader: &mut PeekReader<R>,
+    reader: &mut MavlinkReader<R>,
 ) -> Result<MAVLinkV2MessageRaw, MessageReadError> {
-    read_v2_raw_message_inner::<M, R>(reader, None)
+    match reader.read_raw_message::<M>(ReadVersion::Single(MavlinkVersion::V2))? {
+        MAVLinkMessageRaw::V1(_) => unreachable!("the reader was restricted to MAVLink 2"),
+        MAVLinkMessageRaw::V2(message) => Ok(message),
+    }
 }
 
-/// Read a raw MAVLink 2 message with signing support from a [`PeekReader`].
+/// Read a raw MAVLink 2 message with signing support from a [`MavlinkReader`].
 ///
 /// # Errors
 ///
@@ -1445,72 +1236,52 @@ pub fn read_v2_raw_message<M: Message, R: Read>(
 #[cfg(feature = "mav2-message-signing")]
 #[inline]
 pub fn read_v2_raw_message_signed<M: Message, R: Read>(
-    reader: &mut PeekReader<R>,
+    reader: &mut MavlinkReader<R>,
     signing_data: Option<&SigningData>,
 ) -> Result<MAVLinkV2MessageRaw, MessageReadError> {
-    read_v2_raw_message_inner::<M, R>(reader, signing_data)
-}
-
-#[allow(unused_variables)]
-fn read_v2_raw_message_inner<M: Message, R: Read>(
-    reader: &mut PeekReader<R>,
-    signing_data: Option<&SigningData>,
-) -> Result<MAVLinkV2MessageRaw, MessageReadError> {
-    loop {
-        // search for the magic framing value indicating start of mavlink message
-        while reader.peek_exact(consts::STX_SIZE)?[consts::STX_OFFSET] != MAV_STX_V2 {
-            reader.consume(consts::STX_SIZE);
-        }
-
-        if let Some(message) = try_decode_v2::<M, _>(reader, signing_data)? {
-            return Ok(message);
-        }
+    match reader
+        .read_raw_message_inner::<M>(ReadVersion::Single(MavlinkVersion::V2), signing_data)?
+    {
+        MAVLinkMessageRaw::V1(_) => unreachable!("the reader was restricted to MAVLink 2"),
+        MAVLinkMessageRaw::V2(message) => Ok(message),
     }
 }
 
-/// Asynchronously read a raw MAVLink 2 message from a [`AsyncPeekReader`].
+/// Asynchronously read a raw MAVLink 2 message from an [`AsyncMavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 #[cfg(feature = "tokio")]
 pub async fn read_v2_raw_message_async<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut AsyncPeekReader<R>,
+    reader: &mut AsyncMavlinkReader<R>,
 ) -> Result<MAVLinkV2MessageRaw, MessageReadError> {
-    read_v2_raw_message_async_inner::<M, R>(reader, None).await
-}
-
-#[cfg(feature = "tokio")]
-#[allow(unused_variables)]
-async fn read_v2_raw_message_async_inner<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut AsyncPeekReader<R>,
-    signing_data: Option<&SigningData>,
-) -> Result<MAVLinkV2MessageRaw, MessageReadError> {
-    loop {
-        loop {
-            // search for the magic framing value indicating start of mavlink message
-            if reader.read_u8().await? == MAV_STX_V2 {
-                break;
-            }
-        }
-
-        if let Some(message) = try_decode_v2_async::<M, _>(reader, signing_data).await? {
-            return Ok(message);
-        }
+    match reader
+        .read_raw_message::<M>(ReadVersion::Single(MavlinkVersion::V2))
+        .await?
+    {
+        MAVLinkMessageRaw::V1(_) => unreachable!("the reader was restricted to MAVLink 2"),
+        MAVLinkMessageRaw::V2(message) => Ok(message),
     }
 }
 
-/// Asynchronously read a raw MAVLink 2 message with signing support from a [`AsyncPeekReader`]
+/// Asynchronously read a raw MAVLink 2 message with signing support from a [`AsyncMavlinkReader`]
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 #[cfg(all(feature = "tokio", feature = "mav2-message-signing"))]
 pub async fn read_v2_raw_message_async_signed<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut AsyncPeekReader<R>,
+    reader: &mut AsyncMavlinkReader<R>,
     signing_data: Option<&SigningData>,
 ) -> Result<MAVLinkV2MessageRaw, MessageReadError> {
-    read_v2_raw_message_async_inner::<M, R>(reader, signing_data).await
+    match reader
+        .read_raw_message_inner::<M>(ReadVersion::Single(MavlinkVersion::V2), signing_data)
+        .await?
+    {
+        MAVLinkMessageRaw::V1(_) => unreachable!("the reader was restricted to MAVLink 2"),
+        MAVLinkMessageRaw::V2(message) => Ok(message),
+    }
 }
 
 /// Asynchronously read a raw MAVLink 2 message with signing support from a [`embedded_io_async::Read`]er.
@@ -1561,19 +1332,19 @@ pub async fn read_v2_raw_message_async<M: Message>(
     }
 }
 
-/// Read and parse a MAVLink 2 message from a [`PeekReader`].
+/// Read and parse a MAVLink 2 message from a [`MavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 #[inline]
 pub fn read_v2_msg<M: Message, R: Read>(
-    read: &mut PeekReader<R>,
+    reader: &mut MavlinkReader<R>,
 ) -> Result<(MavHeader, M), MessageReadError> {
-    read_v2_msg_inner(read, None)
+    reader.read_message::<M>(ReadVersion::Single(MavlinkVersion::V2))
 }
 
-/// Read and parse a MAVLink 2 message from a [`PeekReader`].
+/// Read and parse a MAVLink 2 message with signing support from a [`MavlinkReader`].
 ///
 /// # Errors
 ///
@@ -1581,68 +1352,39 @@ pub fn read_v2_msg<M: Message, R: Read>(
 #[cfg(feature = "mav2-message-signing")]
 #[inline]
 pub fn read_v2_msg_signed<M: Message, R: Read>(
-    read: &mut PeekReader<R>,
+    reader: &mut MavlinkReader<R>,
     signing_data: Option<&SigningData>,
 ) -> Result<(MavHeader, M), MessageReadError> {
-    read_v2_msg_inner(read, signing_data)
+    reader.read_message_inner::<M>(ReadVersion::Single(MavlinkVersion::V2), signing_data)
 }
 
-fn read_v2_msg_inner<M: Message, R: Read>(
-    read: &mut PeekReader<R>,
-    signing_data: Option<&SigningData>,
-) -> Result<(MavHeader, M), MessageReadError> {
-    let message = read_v2_raw_message_inner::<M, _>(read, signing_data)?;
-
-    Ok((
-        MavHeader {
-            sequence: message.sequence(),
-            system_id: message.system_id(),
-            component_id: message.component_id(),
-        },
-        M::parse(MavlinkVersion::V2, message.message_id(), message.payload())?,
-    ))
-}
-
-/// Asynchronously read and parse a MAVLink 2 message from a [`AsyncPeekReader`].
+/// Asynchronously read and parse a MAVLink 2 message from an [`AsyncMavlinkReader`].
 ///  
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 #[cfg(feature = "tokio")]
 pub async fn read_v2_msg_async<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    read: &mut AsyncPeekReader<R>,
+    reader: &mut AsyncMavlinkReader<R>,
 ) -> Result<(MavHeader, M), MessageReadError> {
-    read_v2_msg_async_inner(read, None).await
+    reader
+        .read_message::<M>(ReadVersion::Single(MavlinkVersion::V2))
+        .await
 }
 
-/// Asynchronously read and parse a MAVLink 2 message with signing support from a [`AsyncPeekReader`].
+/// Asynchronously read and parse a MAVLink 2 message with signing support from an [`AsyncMavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 #[cfg(all(feature = "tokio", feature = "mav2-message-signing"))]
 pub async fn read_v2_msg_async_signed<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    read: &mut AsyncPeekReader<R>,
+    reader: &mut AsyncMavlinkReader<R>,
     signing_data: Option<&SigningData>,
 ) -> Result<(MavHeader, M), MessageReadError> {
-    read_v2_msg_async_inner(read, signing_data).await
-}
-
-#[cfg(feature = "tokio")]
-async fn read_v2_msg_async_inner<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    read: &mut AsyncPeekReader<R>,
-    signing_data: Option<&SigningData>,
-) -> Result<(MavHeader, M), MessageReadError> {
-    let message = read_v2_raw_message_async_inner::<M, _>(read, signing_data).await?;
-
-    Ok((
-        MavHeader {
-            sequence: message.sequence(),
-            system_id: message.system_id(),
-            component_id: message.component_id(),
-        },
-        M::parse(MavlinkVersion::V2, message.message_id(), message.payload())?,
-    ))
+    reader
+        .read_message_inner::<M>(ReadVersion::Single(MavlinkVersion::V2), signing_data)
+        .await
 }
 
 /// Asynchronously and parse read a MAVLink 2 message from a [`embedded_io_async::Read`]er.
@@ -1714,19 +1456,19 @@ impl MAVLinkMessageRaw {
     }
 }
 
-/// Read a raw MAVLink 1 or 2 message from a [`PeekReader`].
+/// Read a raw MAVLink 1 or 2 message from a [`MavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 #[inline]
 pub fn read_any_raw_message<M: Message, R: Read>(
-    reader: &mut PeekReader<R>,
+    reader: &mut MavlinkReader<R>,
 ) -> Result<MAVLinkMessageRaw, MessageReadError> {
-    read_any_raw_message_inner::<M, R>(reader, None)
+    reader.read_raw_message::<M>(ReadVersion::Any)
 }
 
-/// Read a raw MAVLink 1 or 2 message from a [`PeekReader`] with signing support.
+/// Read a raw MAVLink 1 or 2 message from a [`MavlinkReader`] with signing support.
 ///
 /// # Errors
 ///
@@ -1734,69 +1476,25 @@ pub fn read_any_raw_message<M: Message, R: Read>(
 #[cfg(feature = "mav2-message-signing")]
 #[inline]
 pub fn read_any_raw_message_signed<M: Message, R: Read>(
-    reader: &mut PeekReader<R>,
+    reader: &mut MavlinkReader<R>,
     signing_data: Option<&SigningData>,
 ) -> Result<MAVLinkMessageRaw, MessageReadError> {
-    read_any_raw_message_inner::<M, R>(reader, signing_data)
+    reader.read_raw_message_inner::<M>(ReadVersion::Any, signing_data)
 }
 
-#[allow(unused_variables)]
-fn read_any_raw_message_inner<M: Message, R: Read>(
-    reader: &mut PeekReader<R>,
-    signing_data: Option<&SigningData>,
-) -> Result<MAVLinkMessageRaw, MessageReadError> {
-    loop {
-        // search for the magic framing value indicating start of MAVLink message
-        let version = loop {
-            let byte = reader.peek_exact(consts::STX_SIZE)?[consts::STX_OFFSET];
-            if byte == MAV_STX {
-                break MavlinkVersion::V1;
-            }
-            if byte == MAV_STX_V2 {
-                break MavlinkVersion::V2;
-            }
-            reader.consume(consts::STX_SIZE);
-        };
-        match version {
-            MavlinkVersion::V1 => {
-                if let Some(message) = try_decode_v1::<M, _>(reader)? {
-                    // With signing enabled and unsigned messages not allowed do not further process V1
-                    #[cfg(feature = "mav2-message-signing")]
-                    if let Some(signing) = signing_data {
-                        if signing.config.allow_unsigned {
-                            return Ok(MAVLinkMessageRaw::V1(message));
-                        }
-                    } else {
-                        return Ok(MAVLinkMessageRaw::V1(message));
-                    }
-                    #[cfg(not(feature = "mav2-message-signing"))]
-                    return Ok(MAVLinkMessageRaw::V1(message));
-                }
-
-                reader.consume(consts::STX_SIZE);
-            }
-            MavlinkVersion::V2 => {
-                if let Some(message) = try_decode_v2::<M, _>(reader, signing_data)? {
-                    return Ok(MAVLinkMessageRaw::V2(message));
-                }
-            }
-        }
-    }
-}
-
-/// Asynchronously read a raw MAVLink 1 or 2 message from a [`AsyncPeekReader`].
+/// Asynchronously read a raw MAVLink 1 or 2 message from an [`AsyncMavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 #[cfg(feature = "tokio")]
 pub async fn read_any_raw_message_async<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut AsyncPeekReader<R>,
+    reader: &mut AsyncMavlinkReader<R>,
 ) -> Result<MAVLinkMessageRaw, MessageReadError> {
-    read_any_raw_message_async_inner::<M, R>(reader, None).await
+    reader.read_raw_message::<M>(ReadVersion::Any).await
 }
 
-/// Asynchronously read a raw MAVLink 1 or 2 message from a [`AsyncPeekReader`] with signing support.
+/// Asynchronously read a raw MAVLink 1 or 2 message from an [`AsyncMavlinkReader`] with signing support.
 ///
 /// This will attempt to read until encounters a valid message or an error.
 ///
@@ -1805,68 +1503,27 @@ pub async fn read_any_raw_message_async<M: Message, R: tokio::io::AsyncRead + Un
 /// See [`read_` function error documentation](crate#read-errors)
 #[cfg(all(feature = "tokio", feature = "mav2-message-signing"))]
 pub async fn read_any_raw_message_async_signed<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut AsyncPeekReader<R>,
+    reader: &mut AsyncMavlinkReader<R>,
     signing_data: Option<&SigningData>,
 ) -> Result<MAVLinkMessageRaw, MessageReadError> {
-    read_any_raw_message_async_inner::<M, R>(reader, signing_data).await
+    reader
+        .read_raw_message_inner::<M>(ReadVersion::Any, signing_data)
+        .await
 }
 
-#[cfg(feature = "tokio")]
-#[allow(unused_variables)]
-async fn read_any_raw_message_async_inner<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut AsyncPeekReader<R>,
-    signing_data: Option<&SigningData>,
-) -> Result<MAVLinkMessageRaw, MessageReadError> {
-    loop {
-        // search for the magic framing value indicating start of MAVLink 1 or 2 message
-        let version = loop {
-            let read = reader.read_u8().await?;
-            if read == MAV_STX {
-                break MavlinkVersion::V1;
-            }
-            if read == MAV_STX_V2 {
-                break MavlinkVersion::V2;
-            }
-        };
-
-        match version {
-            MavlinkVersion::V1 => {
-                if let Some(message) = try_decode_v1_async::<M, _>(reader).await? {
-                    // With signing enabled and unsigned messages not allowed do not further process them
-                    #[cfg(feature = "mav2-message-signing")]
-                    if let Some(signing) = signing_data {
-                        if signing.config.allow_unsigned {
-                            return Ok(MAVLinkMessageRaw::V1(message));
-                        }
-                    } else {
-                        return Ok(MAVLinkMessageRaw::V1(message));
-                    }
-                    #[cfg(not(feature = "mav2-message-signing"))]
-                    return Ok(MAVLinkMessageRaw::V1(message));
-                }
-            }
-            MavlinkVersion::V2 => {
-                if let Some(message) = try_decode_v2_async::<M, _>(reader, signing_data).await? {
-                    return Ok(MAVLinkMessageRaw::V2(message));
-                }
-            }
-        }
-    }
-}
-
-/// Read and parse a MAVLink 1 or 2 message from a [`PeekReader`].
+/// Read and parse a MAVLink 1 or 2 message from a [`MavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 #[inline]
 pub fn read_any_msg<M: Message, R: Read>(
-    read: &mut PeekReader<R>,
+    reader: &mut MavlinkReader<R>,
 ) -> Result<(MavHeader, M), MessageReadError> {
-    read_any_msg_inner(read, None)
+    reader.read_message::<M>(ReadVersion::Any)
 }
 
-/// Read and parse a MAVLink 1 or 2 message from a [`PeekReader`] with signing support.
+/// Read and parse a MAVLink 1 or 2 message from a [`MavlinkReader`] with signing support.
 ///
 /// MAVLink 1 messages a treated as unsigned.
 ///
@@ -1876,40 +1533,25 @@ pub fn read_any_msg<M: Message, R: Read>(
 #[cfg(feature = "mav2-message-signing")]
 #[inline]
 pub fn read_any_msg_signed<M: Message, R: Read>(
-    read: &mut PeekReader<R>,
+    reader: &mut MavlinkReader<R>,
     signing_data: Option<&SigningData>,
 ) -> Result<(MavHeader, M), MessageReadError> {
-    read_any_msg_inner(read, signing_data)
+    reader.read_message_inner::<M>(ReadVersion::Any, signing_data)
 }
 
-fn read_any_msg_inner<M: Message, R: Read>(
-    read: &mut PeekReader<R>,
-    signing_data: Option<&SigningData>,
-) -> Result<(MavHeader, M), MessageReadError> {
-    let message = read_any_raw_message_inner::<M, _>(read, signing_data)?;
-    Ok((
-        MavHeader {
-            sequence: message.sequence(),
-            system_id: message.system_id(),
-            component_id: message.component_id(),
-        },
-        M::parse(message.version(), message.message_id(), message.payload())?,
-    ))
-}
-
-/// Asynchronously read and parse a MAVLink 1 or 2 message from a [`AsyncPeekReader`].
+/// Asynchronously read and parse a MAVLink 1 or 2 message from an [`AsyncMavlinkReader`].
 ///
 /// # Errors
 ///
 /// See [`read_` function error documentation](crate#read-errors)
 #[cfg(feature = "tokio")]
 pub async fn read_any_msg_async<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    read: &mut AsyncPeekReader<R>,
+    reader: &mut AsyncMavlinkReader<R>,
 ) -> Result<(MavHeader, M), MessageReadError> {
-    read_any_msg_async_inner(read, None).await
+    reader.read_message::<M>(ReadVersion::Any).await
 }
 
-/// Asynchronously read and parse a MAVLink 1 or 2 message from a [`AsyncPeekReader`] with signing support.
+/// Asynchronously read and parse a MAVLink 1 or 2 message from an [`AsyncMavlinkReader`] with signing support.
 ///
 /// MAVLink 1 messages a treated as unsigned.
 ///
@@ -1919,27 +1561,12 @@ pub async fn read_any_msg_async<M: Message, R: tokio::io::AsyncRead + Unpin>(
 #[cfg(all(feature = "tokio", feature = "mav2-message-signing"))]
 #[inline]
 pub async fn read_any_msg_async_signed<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    read: &mut AsyncPeekReader<R>,
+    reader: &mut AsyncMavlinkReader<R>,
     signing_data: Option<&SigningData>,
 ) -> Result<(MavHeader, M), MessageReadError> {
-    read_any_msg_async_inner(read, signing_data).await
-}
-
-#[cfg(feature = "tokio")]
-async fn read_any_msg_async_inner<M: Message, R: tokio::io::AsyncRead + Unpin>(
-    read: &mut AsyncPeekReader<R>,
-    signing_data: Option<&SigningData>,
-) -> Result<(MavHeader, M), MessageReadError> {
-    let message = read_any_raw_message_async_inner::<M, _>(read, signing_data).await?;
-
-    Ok((
-        MavHeader {
-            sequence: message.sequence(),
-            system_id: message.system_id(),
-            component_id: message.component_id(),
-        },
-        M::parse(message.version(), message.message_id(), message.payload())?,
-    ))
+    reader
+        .read_message_inner::<M>(ReadVersion::Any, signing_data)
+        .await
 }
 
 /// Write a MAVLink message using the given mavlink version to a [`Write`]r.

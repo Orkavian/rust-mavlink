@@ -1,14 +1,14 @@
 //! File MAVLINK connection
 
+use crate::MavlinkReader;
 use crate::connection::{Connection, MavConnection};
 use crate::connection_shared::{ConnectionState, read_message, read_raw_message};
 use crate::error::{MessageReadError, MessageWriteError};
-use crate::peek_reader::PeekReader;
 use crate::{Connectable, MAVLinkMessageRaw};
 use crate::{MavHeader, MavlinkVersion, Message};
 use core::ops::DerefMut;
 use std::fs::File;
-use std::io;
+use std::io::{self, BufReader};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -21,13 +21,13 @@ pub fn open(file_path: &PathBuf) -> io::Result<FileConnection> {
     let file = File::open(file_path)?;
 
     Ok(FileConnection {
-        file: Mutex::new(PeekReader::new(file)),
+        file: Mutex::new(MavlinkReader::new(BufReader::new(file))),
         state: ConnectionState::new(),
     })
 }
 
 pub struct FileConnection {
-    file: Mutex<PeekReader<File>>,
+    file: Mutex<MavlinkReader<BufReader<File>>>,
     state: ConnectionState,
 }
 

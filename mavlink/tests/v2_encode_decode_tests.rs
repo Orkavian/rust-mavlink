@@ -3,12 +3,12 @@ mod test_shared;
 #[cfg(feature = "dialect-common")]
 mod test_v2_encode_decode {
     use crate::test_shared::HEARTBEAT_V2;
+    use mavlink_core::MavlinkReader;
     use mavlink_core::Message;
-    use mavlink_core::peek_reader::PeekReader;
 
     #[test]
     pub fn test_read_v2_heartbeat() {
-        let mut r = PeekReader::new(HEARTBEAT_V2);
+        let mut r = MavlinkReader::new(HEARTBEAT_V2);
         let (header, msg) = mavlink::read_v2_msg(&mut r).expect("Failed to parse message");
 
         assert_eq!(header, crate::test_shared::COMMON_MSG_HEADER);
@@ -91,7 +91,7 @@ mod test_v2_encode_decode {
 
     #[test]
     pub fn test_read_truncated_command_long() {
-        let mut r = PeekReader::new(COMMAND_LONG_TRUNCATED_V2);
+        let mut r = MavlinkReader::new(COMMAND_LONG_TRUNCATED_V2);
         let (_header, recv_msg) =
             mavlink::read_v2_msg(&mut r).expect("Failed to parse COMMAND_LONG_TRUNCATED_V2");
 
@@ -120,7 +120,7 @@ mod test_v2_encode_decode {
         )
         .expect("Failed to write message");
 
-        let mut c = PeekReader::new(v.as_slice());
+        let mut c = MavlinkReader::new(v.as_slice());
         let (_header, recv_msg): (mavlink::MavHeader, mavlink::dialects::common::MavMessage) =
             mavlink::read_v2_msg(&mut c).expect("Failed to read");
 
@@ -156,7 +156,7 @@ mod test_v2_encode_decode {
 
         use mavlink_core::error::MessageReadError;
 
-        let mut reader = PeekReader::new(crate::test_shared::BlockyReader::new(HEARTBEAT_V2));
+        let mut reader = MavlinkReader::new(crate::test_shared::BlockyReader::new(HEARTBEAT_V2));
 
         loop {
             match mavlink::read_v2_msg::<mavlink::dialects::common::MavMessage, _>(&mut reader) {
@@ -168,6 +168,29 @@ mod test_v2_encode_decode {
                 Err(err) => panic!("{err}"),
             }
         }
+    }
+
+    #[test]
+    pub fn test_resynchronizes_after_rejected_frames() {
+        let mut unsupported = crate::test_shared::HEARTBEAT_V2.to_vec();
+        unsupported[2] = 0x80;
+
+        let mut invalid_crc = crate::test_shared::HEARTBEAT_V2.to_vec();
+        *invalid_crc.last_mut().unwrap() ^= 1;
+
+        let mut stream = unsupported;
+        stream.extend_from_slice(&invalid_crc);
+        stream.extend_from_slice(crate::test_shared::HEARTBEAT_V2);
+
+        let mut reader = MavlinkReader::new(stream.as_slice());
+        let (header, message) =
+            mavlink::read_v2_msg::<mavlink::dialects::common::MavMessage, _>(&mut reader)
+                .expect("reader should resynchronize at the valid frame");
+        assert_eq!(header, crate::test_shared::COMMON_MSG_HEADER);
+        assert!(matches!(
+            message,
+            mavlink::dialects::common::MavMessage::HEARTBEAT(_)
+        ));
     }
 
     const PARAMETER_VALUE_BAT1_R_INTERNAL: &[u8] = &[
@@ -184,7 +207,7 @@ mod test_v2_encode_decode {
 
     #[test]
     pub fn test_decode_encode_v2_frame_parameter_value_bat1_r_internal() {
-        let mut r = PeekReader::new(PARAMETER_VALUE_BAT1_R_INTERNAL);
+        let mut r = MavlinkReader::new(PARAMETER_VALUE_BAT1_R_INTERNAL);
         let (header, msg) =
             mavlink::read_v2_msg::<mavlink::dialects::common::MavMessage, _>(&mut r)
                 .expect("decode");
@@ -197,7 +220,7 @@ mod test_v2_encode_decode {
 
     #[test]
     pub fn test_decode_encode_v2_frame_parameter_value_hash_check() {
-        let mut r = PeekReader::new(PARAMETER_VALUE_HASH_CHECK);
+        let mut r = MavlinkReader::new(PARAMETER_VALUE_HASH_CHECK);
         let (header, msg) =
             mavlink::read_v2_msg::<mavlink::dialects::common::MavMessage, _>(&mut r)
                 .expect("decode");

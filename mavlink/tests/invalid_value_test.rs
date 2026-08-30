@@ -3,10 +3,9 @@ mod test_shared;
 #[cfg(feature = "dialect-common")]
 mod helper_tests {
     use mavlink::{
-        MessageData, calculate_crc,
+        MavlinkReader, MessageData, calculate_crc,
         dialects::common::MavMessage,
         error::{MessageReadError, ParserError},
-        peek_reader::PeekReader,
     };
 
     #[test]
@@ -25,7 +24,7 @@ mod helper_tests {
         invalid_enum_buf[HEARTBEAT_V2.len() - 2..HEARTBEAT_V2.len()]
             .copy_from_slice(&crc.to_le_bytes());
 
-        let result = mavlink::read_v2_msg::<MavMessage, _>(&mut PeekReader::new(
+        let result = mavlink::read_v2_msg::<MavMessage, _>(&mut MavlinkReader::new(
             invalid_enum_buf.as_slice(),
         ));
         assert!(matches!(
@@ -35,6 +34,30 @@ mod helper_tests {
                 value: 255
             }))
         ));
+    }
+
+    #[test]
+    fn valid_crc_parse_error_consumes_the_complete_frame() {
+        use crate::test_shared::HEARTBEAT_V2;
+
+        let mut invalid = HEARTBEAT_V2.to_vec();
+        invalid[1 + 9 + 5] = 255;
+        let crc = calculate_crc(
+            &invalid[1..HEARTBEAT_V2.len() - 2],
+            mavlink::dialects::common::HEARTBEAT_DATA::EXTRA_CRC,
+        );
+        invalid[HEARTBEAT_V2.len() - 2..].copy_from_slice(&crc.to_le_bytes());
+        invalid.extend_from_slice(HEARTBEAT_V2);
+
+        let mut reader = MavlinkReader::new(invalid.as_slice());
+        assert!(matches!(
+            mavlink::read_v2_msg::<MavMessage, _>(&mut reader),
+            Err(MessageReadError::Parse(ParserError::InvalidEnum { .. }))
+        ));
+
+        let (_, message) = mavlink::read_v2_msg::<MavMessage, _>(&mut reader)
+            .expect("the valid frame after the parse error must remain readable");
+        assert!(matches!(message, MavMessage::HEARTBEAT(_)));
     }
 
     #[test]
@@ -60,7 +83,7 @@ mod helper_tests {
         )
         .expect("failed to serialize SET_POSITION_TARGET_GLOBAL_INT");
 
-        let mut reader = PeekReader::new(buffer.as_slice());
+        let mut reader = MavlinkReader::new(buffer.as_slice());
         let (_header, recv_msg) = mavlink::read_v2_msg::<MavMessage, _>(&mut reader)
             .expect("failed to parse SET_POSITION_TARGET_GLOBAL_INT with unknown bitmask bits");
 

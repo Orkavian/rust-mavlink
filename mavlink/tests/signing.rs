@@ -3,8 +3,8 @@ mod test_shared;
 #[cfg(feature = "mav2-message-signing")]
 mod signing {
     use mavlink::{
-        MAV_STX_V2, MAVLinkV2MessageRaw, MavHeader, SigningConfig, SigningData,
-        dialects::common::HEARTBEAT_DATA, peek_reader::PeekReader, read_v2_raw_message,
+        MAV_STX_V2, MAVLinkV2MessageRaw, MavHeader, MavlinkReader, SigningConfig, SigningData,
+        dialects::common::HEARTBEAT_DATA, read_v2_raw_message,
     };
 
     use crate::test_shared::SECRET_KEY;
@@ -50,7 +50,7 @@ mod signing {
     pub fn test_verify() {
         let signing_cfg = SigningConfig::new(SECRET_KEY, 0, true, false);
         let signing_data = SigningData::from_config(signing_cfg);
-        let mut r = PeekReader::new(HEARTBEAT_SIGNED);
+        let mut r = MavlinkReader::new(HEARTBEAT_SIGNED);
         let msg = read_v2_raw_message::<mavlink::dialects::common::MavMessage, _>(&mut r).unwrap();
         assert!(
             signing_data.verify_signature(&msg),
@@ -62,7 +62,7 @@ mod signing {
     pub fn test_invalid_ts() {
         let signing_cfg = SigningConfig::new(SECRET_KEY, 0, true, false);
         let signing_data = SigningData::from_config(signing_cfg);
-        let mut r = PeekReader::new(HEARTBEAT_SIGNED);
+        let mut r = MavlinkReader::new(HEARTBEAT_SIGNED);
         let mut msg =
             read_v2_raw_message::<mavlink::dialects::common::MavMessage, _>(&mut r).unwrap();
         msg.signature_timestamp_bytes_mut()

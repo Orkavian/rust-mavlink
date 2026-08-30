@@ -2,13 +2,13 @@
 
 use crate::Connectable;
 use crate::MAVLinkMessageRaw;
+use crate::MavlinkReader;
 use crate::connection::get_socket_addr;
 use crate::connection::{Connection, MavConnection};
 use crate::connection_shared::{
     ConnectionState, next_send_header, read_message, read_raw_message, write_message,
     write_raw_message,
 };
-use crate::peek_reader::PeekReader;
 use crate::{MavHeader, MavlinkVersion, Message};
 use core::ops::DerefMut;
 use std::collections::VecDeque;
@@ -73,7 +73,7 @@ impl Write for UdpWrite {
 }
 
 pub struct UdpConnection {
-    reader: Mutex<PeekReader<UdpRead>>,
+    reader: Mutex<MavlinkReader<UdpRead>>,
     writer: Mutex<UdpWrite>,
     state: ConnectionState,
     server: bool,
@@ -83,7 +83,7 @@ impl UdpConnection {
     fn new(socket: UdpSocket, server: bool, dest: Option<SocketAddr>) -> io::Result<Self> {
         Ok(Self {
             server,
-            reader: Mutex::new(PeekReader::new(UdpRead {
+            reader: Mutex::new(MavlinkReader::new(UdpRead {
                 socket: socket.try_clone()?,
                 buffer: VecDeque::new(),
                 last_recv_address: None,
@@ -97,9 +97,9 @@ impl UdpConnection {
         })
     }
 
-    fn update_reply_destination(&self, reader: &PeekReader<UdpRead>) {
+    fn update_reply_destination(&self, reader: &MavlinkReader<UdpRead>) {
         if self.server {
-            if let addr @ Some(_) = reader.reader_ref().last_recv_address {
+            if let addr @ Some(_) = reader.get_ref().last_recv_address {
                 self.writer.lock().unwrap().dest = addr;
             }
         }
@@ -125,12 +125,12 @@ impl<M: Message> MavConnection<M> for UdpConnection {
 
     fn try_recv(&self) -> Result<(MavHeader, M), crate::error::MessageReadError> {
         let mut reader = self.reader.lock().unwrap();
-        reader.reader_mut().socket.set_nonblocking(true)?;
+        reader.get_mut().socket.set_nonblocking(true)?;
 
         let result = read_message::<M, _>(reader.deref_mut(), &self.state);
         self.update_reply_destination(&reader);
 
-        reader.reader_mut().socket.set_nonblocking(false)?;
+        reader.get_mut().socket.set_nonblocking(false)?;
 
         result
     }

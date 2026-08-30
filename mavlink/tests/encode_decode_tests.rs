@@ -4,7 +4,7 @@ mod test_shared;
 #[cfg(feature = "dialect-common")]
 mod test_encode_decode {
     use mavlink::{Message, dialects::common};
-    use mavlink_core::peek_reader::PeekReader;
+    use mavlink_core::MavlinkReader;
 
     #[test]
     pub fn test_echo_heartbeat() {
@@ -19,7 +19,7 @@ mod test_encode_decode {
         )
         .expect("Failed to write message");
 
-        let mut c = PeekReader::new(b.as_slice());
+        let mut c = MavlinkReader::new(b.as_slice());
         let (_header, recv_msg): (mavlink::MavHeader, common::MavMessage) =
             mavlink::read_v2_msg(&mut c).expect("Failed to read");
         assert_eq!(recv_msg.message_id(), 0);
@@ -38,7 +38,7 @@ mod test_encode_decode {
         )
         .expect("Failed to write message");
 
-        let mut c = PeekReader::new(b.as_slice());
+        let mut c = MavlinkReader::new(b.as_slice());
         let (_header, recv_msg) = mavlink::read_v2_msg(&mut c).expect("Failed to read");
 
         if let common::MavMessage::COMMAND_INT(recv_msg) = recv_msg {
@@ -61,7 +61,7 @@ mod test_encode_decode {
         )
         .expect("Failed to write message");
 
-        let mut c = PeekReader::new(b.as_slice());
+        let mut c = MavlinkReader::new(b.as_slice());
         let (_header, recv_msg) = mavlink::read_v2_msg(&mut c).expect("Failed to read");
         if let mavlink::dialects::common::MavMessage::HIL_ACTUATOR_CONTROLS(recv_msg) = recv_msg {
             assert_eq!(
@@ -92,7 +92,7 @@ mod test_encode_decode {
         )
         .expect("Failed to write message");
 
-        let mut c = PeekReader::new(b.as_slice());
+        let mut c = MavlinkReader::new(b.as_slice());
         let (_header, recv_msg) = mavlink::read_v2_msg(&mut c).expect("Failed to read");
 
         match &recv_msg {
@@ -122,7 +122,7 @@ mod test_encode_decode {
         )
         .expect("Failed to write message");
 
-        let mut c = PeekReader::new(b.as_slice());
+        let mut c = MavlinkReader::new(b.as_slice());
         let (_header, recv_msg) = mavlink::read_v2_msg(&mut c).expect("Failed to read");
         if let ardupilotmega::MavMessage::MOUNT_STATUS(recv_msg) = recv_msg {
             assert_eq!(4, recv_msg.pointing_b);
@@ -147,7 +147,7 @@ mod test_encode_decode {
         )
         .expect("Failed to write message");
 
-        let mut c = PeekReader::new(b.as_slice());
+        let mut c = MavlinkReader::new(b.as_slice());
         let (_header, recv_msg) = mavlink::read_v2_msg(&mut c).expect("Failed to read");
 
         match &recv_msg {
@@ -178,7 +178,7 @@ mod test_encode_decode {
 
             // dbg!(id, &v);
 
-            let mut reader = PeekReader::new(buffer.as_slice());
+            let mut reader = MavlinkReader::new(buffer.as_slice());
             let (decoded_header, decoded_message) =
                 mavlink::read_v2_msg::<M, _>(&mut reader).expect("Failed to read");
 

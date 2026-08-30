@@ -8,18 +8,42 @@ expression: contents
 #![allow(deprecated)]
 #![allow(clippy::match_single_binding)]
 #![allow(rustdoc::broken_intra_doc_links)]
-#[cfg(feature = "arbitrary")]
-use arbitrary::Arbitrary;
 #[allow(unused_imports)]
 use bitflags::{bitflags, Flags};
 #[allow(unused_imports)]
-use mavlink_core::{
-    bytes::Bytes, bytes_mut::BytesMut, types::CharArray, MavlinkVersion, Message, MessageData,
-};
+use mavlink_core::{types::CharArray, MavlinkVersion, Message, MessageData};
 #[allow(unused_imports)]
 use num_derive::{FromPrimitive, ToPrimitive};
 #[allow(unused_imports)]
 use num_traits::{FromPrimitive, ToPrimitive};
+#[allow(dead_code)]
+#[inline(always)]
+fn __mavlink_take_slice<'a>(input: &mut &'a [u8], len: usize) -> &'a [u8] {
+    let (field, remaining) = input.split_at(len);
+    *input = remaining;
+    field
+}
+#[allow(dead_code)]
+#[inline(always)]
+fn __mavlink_take<const N: usize>(input: &mut &[u8]) -> [u8; N] {
+    let mut value = [0; N];
+    value.copy_from_slice(__mavlink_take_slice(input, N));
+    value
+}
+#[allow(dead_code)]
+#[inline(always)]
+fn __mavlink_put_slice(output: &mut &mut [u8], value: &[u8]) {
+    let (field, remaining) = core::mem::take(output).split_at_mut(value.len());
+    field.copy_from_slice(value);
+    *output = remaining;
+}
+#[allow(dead_code)]
+#[inline(always)]
+fn __mavlink_put<const N: usize>(output: &mut &mut [u8], value: [u8; N]) {
+    __mavlink_put_slice(output, &value);
+}
+#[cfg(feature = "arbitrary")]
+use arbitrary::Arbitrary;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts-rs")]
@@ -108,34 +132,36 @@ impl MessageData for PARAM_REQUEST_LIST_DATA {
     ) -> Result<Self, ::mavlink_core::error::ParserError> {
         let avail_len = __input.len();
         let mut payload_buf;
-        let mut buf = if avail_len < Self::ENCODED_LEN {
-            payload_buf = [0; Self::ENCODED_LEN];
-            payload_buf[0..avail_len].copy_from_slice(__input);
-            Bytes::new(&payload_buf)
+        let mut buf: &[u8] = if let Some(payload) = __input.get(..Self::ENCODED_LEN) {
+            payload
         } else {
-            Bytes::new(__input)
+            payload_buf = [0; Self::ENCODED_LEN];
+            payload_buf[..avail_len].copy_from_slice(__input);
+            &payload_buf
         };
         let mut __struct = Self::default();
-        __struct.target_system = buf.get_u8()?;
-        __struct.target_component = buf.get_u8()?;
+        __struct.target_system = <u8>::from_le_bytes(__mavlink_take::<1usize>(&mut buf));
+        __struct.target_component = <u8>::from_le_bytes(__mavlink_take::<1usize>(&mut buf));
+        debug_assert!(buf.is_empty());
         Ok(__struct)
     }
     fn ser(&self, version: MavlinkVersion, bytes: &mut [u8]) -> usize {
-        let mut __tmp = BytesMut::new(bytes);
-        if __tmp.remaining() < Self::ENCODED_LEN {
+        let __available = bytes.len();
+        if __available < Self::ENCODED_LEN {
             panic!(
                 "buffer is too small (need {} bytes, but got {})",
                 Self::ENCODED_LEN,
-                __tmp.remaining(),
+                __available,
             )
         }
-        __tmp.put_u8(self.target_system);
-        __tmp.put_u8(self.target_component);
+        let mut __tmp: &mut [u8] = bytes;
+        __mavlink_put::<1usize>(&mut __tmp, (self.target_system).to_le_bytes());
+        __mavlink_put::<1usize>(&mut __tmp, (self.target_component).to_le_bytes());
         if matches!(version, MavlinkVersion::V2) {
-            let len = __tmp.len();
+            let len = __available - __tmp.len();
             ::mavlink_core::utils::remove_trailing_zeroes(&bytes[..len])
         } else {
-            __tmp.len()
+            __available - __tmp.len()
         }
     }
 }
@@ -192,44 +218,40 @@ impl MessageData for PARAM_REQUEST_READ_DATA {
     ) -> Result<Self, ::mavlink_core::error::ParserError> {
         let avail_len = __input.len();
         let mut payload_buf;
-        let mut buf = if avail_len < Self::ENCODED_LEN {
-            payload_buf = [0; Self::ENCODED_LEN];
-            payload_buf[0..avail_len].copy_from_slice(__input);
-            Bytes::new(&payload_buf)
+        let mut buf: &[u8] = if let Some(payload) = __input.get(..Self::ENCODED_LEN) {
+            payload
         } else {
-            Bytes::new(__input)
+            payload_buf = [0; Self::ENCODED_LEN];
+            payload_buf[..avail_len].copy_from_slice(__input);
+            &payload_buf
         };
         let mut __struct = Self::default();
-        __struct.param_index = buf.get_i16_le()?;
-        __struct.target_system = buf.get_u8()?;
-        __struct.target_component = buf.get_u8()?;
-        let mut tmp = [0_u8; 16usize];
-        for v in &mut tmp {
-            *v = buf.get_u8()?;
-        }
-        __struct.param_id = CharArray::new(tmp);
+        __struct.param_index = <i16>::from_le_bytes(__mavlink_take::<2usize>(&mut buf));
+        __struct.target_system = <u8>::from_le_bytes(__mavlink_take::<1usize>(&mut buf));
+        __struct.target_component = <u8>::from_le_bytes(__mavlink_take::<1usize>(&mut buf));
+        __struct.param_id = CharArray::new(__mavlink_take::<16usize>(&mut buf));
+        debug_assert!(buf.is_empty());
         Ok(__struct)
     }
     fn ser(&self, version: MavlinkVersion, bytes: &mut [u8]) -> usize {
-        let mut __tmp = BytesMut::new(bytes);
-        if __tmp.remaining() < Self::ENCODED_LEN {
+        let __available = bytes.len();
+        if __available < Self::ENCODED_LEN {
             panic!(
                 "buffer is too small (need {} bytes, but got {})",
                 Self::ENCODED_LEN,
-                __tmp.remaining(),
+                __available,
             )
         }
-        __tmp.put_i16_le(self.param_index);
-        __tmp.put_u8(self.target_system);
-        __tmp.put_u8(self.target_component);
-        for val in &self.param_id {
-            __tmp.put_u8(*val);
-        }
+        let mut __tmp: &mut [u8] = bytes;
+        __mavlink_put::<2usize>(&mut __tmp, (self.param_index).to_le_bytes());
+        __mavlink_put::<1usize>(&mut __tmp, (self.target_system).to_le_bytes());
+        __mavlink_put::<1usize>(&mut __tmp, (self.target_component).to_le_bytes());
+        __mavlink_put_slice(&mut __tmp, &(self.param_id)[..]);
         if matches!(version, MavlinkVersion::V2) {
-            let len = __tmp.len();
+            let len = __available - __tmp.len();
             ::mavlink_core::utils::remove_trailing_zeroes(&bytes[..len])
         } else {
-            __tmp.len()
+            __available - __tmp.len()
         }
     }
 }
@@ -289,51 +311,47 @@ impl MessageData for PARAM_SET_DATA {
     ) -> Result<Self, ::mavlink_core::error::ParserError> {
         let avail_len = __input.len();
         let mut payload_buf;
-        let mut buf = if avail_len < Self::ENCODED_LEN {
-            payload_buf = [0; Self::ENCODED_LEN];
-            payload_buf[0..avail_len].copy_from_slice(__input);
-            Bytes::new(&payload_buf)
+        let mut buf: &[u8] = if let Some(payload) = __input.get(..Self::ENCODED_LEN) {
+            payload
         } else {
-            Bytes::new(__input)
+            payload_buf = [0; Self::ENCODED_LEN];
+            payload_buf[..avail_len].copy_from_slice(__input);
+            &payload_buf
         };
         let mut __struct = Self::default();
-        __struct.param_value = buf.get_f32_le()?;
-        __struct.target_system = buf.get_u8()?;
-        __struct.target_component = buf.get_u8()?;
-        let mut tmp = [0_u8; 16usize];
-        for v in &mut tmp {
-            *v = buf.get_u8()?;
-        }
-        __struct.param_id = CharArray::new(tmp);
-        let tmp = buf.get_u8()?;
+        __struct.param_value = <f32>::from_le_bytes(__mavlink_take::<4usize>(&mut buf));
+        __struct.target_system = <u8>::from_le_bytes(__mavlink_take::<1usize>(&mut buf));
+        __struct.target_component = <u8>::from_le_bytes(__mavlink_take::<1usize>(&mut buf));
+        __struct.param_id = CharArray::new(__mavlink_take::<16usize>(&mut buf));
+        let tmp = <u8>::from_le_bytes(__mavlink_take::<1usize>(&mut buf));
         __struct.param_type =
             FromPrimitive::from_u8(tmp).ok_or(::mavlink_core::error::ParserError::InvalidEnum {
                 enum_type: "MavParamType",
                 value: tmp as u64,
             })?;
+        debug_assert!(buf.is_empty());
         Ok(__struct)
     }
     fn ser(&self, version: MavlinkVersion, bytes: &mut [u8]) -> usize {
-        let mut __tmp = BytesMut::new(bytes);
-        if __tmp.remaining() < Self::ENCODED_LEN {
+        let __available = bytes.len();
+        if __available < Self::ENCODED_LEN {
             panic!(
                 "buffer is too small (need {} bytes, but got {})",
                 Self::ENCODED_LEN,
-                __tmp.remaining(),
+                __available,
             )
         }
-        __tmp.put_f32_le(self.param_value);
-        __tmp.put_u8(self.target_system);
-        __tmp.put_u8(self.target_component);
-        for val in &self.param_id {
-            __tmp.put_u8(*val);
-        }
-        __tmp.put_u8(self.param_type as u8);
+        let mut __tmp: &mut [u8] = bytes;
+        __mavlink_put::<4usize>(&mut __tmp, (self.param_value).to_le_bytes());
+        __mavlink_put::<1usize>(&mut __tmp, (self.target_system).to_le_bytes());
+        __mavlink_put::<1usize>(&mut __tmp, (self.target_component).to_le_bytes());
+        __mavlink_put_slice(&mut __tmp, &(self.param_id)[..]);
+        __mavlink_put::<1usize>(&mut __tmp, (self.param_type as u8).to_le_bytes());
         if matches!(version, MavlinkVersion::V2) {
-            let len = __tmp.len();
+            let len = __available - __tmp.len();
             ::mavlink_core::utils::remove_trailing_zeroes(&bytes[..len])
         } else {
-            __tmp.len()
+            __available - __tmp.len()
         }
     }
 }
@@ -393,51 +411,47 @@ impl MessageData for PARAM_VALUE_DATA {
     ) -> Result<Self, ::mavlink_core::error::ParserError> {
         let avail_len = __input.len();
         let mut payload_buf;
-        let mut buf = if avail_len < Self::ENCODED_LEN {
-            payload_buf = [0; Self::ENCODED_LEN];
-            payload_buf[0..avail_len].copy_from_slice(__input);
-            Bytes::new(&payload_buf)
+        let mut buf: &[u8] = if let Some(payload) = __input.get(..Self::ENCODED_LEN) {
+            payload
         } else {
-            Bytes::new(__input)
+            payload_buf = [0; Self::ENCODED_LEN];
+            payload_buf[..avail_len].copy_from_slice(__input);
+            &payload_buf
         };
         let mut __struct = Self::default();
-        __struct.param_value = buf.get_f32_le()?;
-        __struct.param_count = buf.get_u16_le()?;
-        __struct.param_index = buf.get_u16_le()?;
-        let mut tmp = [0_u8; 16usize];
-        for v in &mut tmp {
-            *v = buf.get_u8()?;
-        }
-        __struct.param_id = CharArray::new(tmp);
-        let tmp = buf.get_u8()?;
+        __struct.param_value = <f32>::from_le_bytes(__mavlink_take::<4usize>(&mut buf));
+        __struct.param_count = <u16>::from_le_bytes(__mavlink_take::<2usize>(&mut buf));
+        __struct.param_index = <u16>::from_le_bytes(__mavlink_take::<2usize>(&mut buf));
+        __struct.param_id = CharArray::new(__mavlink_take::<16usize>(&mut buf));
+        let tmp = <u8>::from_le_bytes(__mavlink_take::<1usize>(&mut buf));
         __struct.param_type =
             FromPrimitive::from_u8(tmp).ok_or(::mavlink_core::error::ParserError::InvalidEnum {
                 enum_type: "MavParamType",
                 value: tmp as u64,
             })?;
+        debug_assert!(buf.is_empty());
         Ok(__struct)
     }
     fn ser(&self, version: MavlinkVersion, bytes: &mut [u8]) -> usize {
-        let mut __tmp = BytesMut::new(bytes);
-        if __tmp.remaining() < Self::ENCODED_LEN {
+        let __available = bytes.len();
+        if __available < Self::ENCODED_LEN {
             panic!(
                 "buffer is too small (need {} bytes, but got {})",
                 Self::ENCODED_LEN,
-                __tmp.remaining(),
+                __available,
             )
         }
-        __tmp.put_f32_le(self.param_value);
-        __tmp.put_u16_le(self.param_count);
-        __tmp.put_u16_le(self.param_index);
-        for val in &self.param_id {
-            __tmp.put_u8(*val);
-        }
-        __tmp.put_u8(self.param_type as u8);
+        let mut __tmp: &mut [u8] = bytes;
+        __mavlink_put::<4usize>(&mut __tmp, (self.param_value).to_le_bytes());
+        __mavlink_put::<2usize>(&mut __tmp, (self.param_count).to_le_bytes());
+        __mavlink_put::<2usize>(&mut __tmp, (self.param_index).to_le_bytes());
+        __mavlink_put_slice(&mut __tmp, &(self.param_id)[..]);
+        __mavlink_put::<1usize>(&mut __tmp, (self.param_type as u8).to_le_bytes());
         if matches!(version, MavlinkVersion::V2) {
-            let len = __tmp.len();
+            let len = __available - __tmp.len();
             ::mavlink_core::utils::remove_trailing_zeroes(&bytes[..len])
         } else {
-            __tmp.len()
+            __available - __tmp.len()
         }
     }
 }
@@ -557,6 +571,30 @@ impl Message for MavMessage {
             Self::PARAM_REQUEST_READ(body) => body.ser(version, bytes),
             Self::PARAM_SET(body) => body.ser(version, bytes),
             Self::PARAM_VALUE(body) => body.ser(version, bytes),
+        }
+    }
+    fn ser_with_metadata(&self, version: MavlinkVersion, bytes: &mut [u8]) -> (usize, u32, u8) {
+        match self {
+            Self::PARAM_REQUEST_LIST(body) => (
+                body.ser(version, bytes),
+                PARAM_REQUEST_LIST_DATA::ID,
+                PARAM_REQUEST_LIST_DATA::EXTRA_CRC,
+            ),
+            Self::PARAM_REQUEST_READ(body) => (
+                body.ser(version, bytes),
+                PARAM_REQUEST_READ_DATA::ID,
+                PARAM_REQUEST_READ_DATA::EXTRA_CRC,
+            ),
+            Self::PARAM_SET(body) => (
+                body.ser(version, bytes),
+                PARAM_SET_DATA::ID,
+                PARAM_SET_DATA::EXTRA_CRC,
+            ),
+            Self::PARAM_VALUE(body) => (
+                body.ser(version, bytes),
+                PARAM_VALUE_DATA::ID,
+                PARAM_VALUE_DATA::EXTRA_CRC,
+            ),
         }
     }
     fn extra_crc(id: u32) -> u8 {

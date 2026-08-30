@@ -221,6 +221,8 @@ impl MavProfile {
         let mav_message_random_from_id =
             self.emit_mav_message_random_from_id(&enum_names, &struct_names);
         let mav_message_serialize = self.emit_mav_message_serialize(&enum_names);
+        let mav_message_serialize_with_metadata =
+            self.emit_mav_message_serialize_with_metadata(&enum_names, &struct_names);
         let mav_message_target_system_id = self.emit_mav_message_target_system_id();
         let mav_message_target_component_id = self.emit_mav_message_target_component_id();
 
@@ -236,7 +238,37 @@ impl MavProfile {
             #[allow(unused_imports)]
             use bitflags::{bitflags, Flags};
             #[allow(unused_imports)]
-            use mavlink_core::{MavlinkVersion, Message, MessageData, bytes::Bytes, bytes_mut::BytesMut, types::CharArray};
+            use mavlink_core::{MavlinkVersion, Message, MessageData, types::CharArray};
+
+            #[allow(dead_code)]
+            #[inline(always)]
+            fn __mavlink_take_slice<'a>(input: &mut &'a [u8], len: usize) -> &'a [u8] {
+                let (field, remaining) = input.split_at(len);
+                *input = remaining;
+                field
+            }
+
+            #[allow(dead_code)]
+            #[inline(always)]
+            fn __mavlink_take<const N: usize>(input: &mut &[u8]) -> [u8; N] {
+                let mut value = [0; N];
+                value.copy_from_slice(__mavlink_take_slice(input, N));
+                value
+            }
+
+            #[allow(dead_code)]
+            #[inline(always)]
+            fn __mavlink_put_slice(output: &mut &mut [u8], value: &[u8]) {
+                let (field, remaining) = core::mem::take(output).split_at_mut(value.len());
+                field.copy_from_slice(value);
+                *output = remaining;
+            }
+
+            #[allow(dead_code)]
+            #[inline(always)]
+            fn __mavlink_put<const N: usize>(output: &mut &mut [u8], value: [u8; N]) {
+                __mavlink_put_slice(output, &value);
+            }
 
             #[cfg(feature = "serde")]
             use serde::{Serialize, Deserialize};
@@ -270,6 +302,7 @@ impl MavProfile {
                 #mav_message_default_from_id
                 #mav_message_random_from_id
                 #mav_message_serialize
+                #mav_message_serialize_with_metadata
                 #mav_message_crc
                 #mav_message_target_system_id
                 #mav_message_target_component_id
@@ -463,6 +496,21 @@ impl MavProfile {
             fn ser(&self, version: MavlinkVersion, bytes: &mut [u8]) -> usize {
                 match self {
                     #(Self::#enums(body) => body.ser(version, bytes),)*
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn emit_mav_message_serialize_with_metadata(
+        &self,
+        enums: &[TokenStream],
+        structs: &[TokenStream],
+    ) -> TokenStream {
+        quote! {
+            fn ser_with_metadata(&self, version: MavlinkVersion, bytes: &mut [u8]) -> (usize, u32, u8) {
+                match self {
+                    #(Self::#enums(body) => (body.ser(version, bytes), #structs::ID, #structs::EXTRA_CRC),)*
                 }
             }
         }
@@ -987,23 +1035,24 @@ impl MavMessage {
         let ser_vars = base_fields.iter().map(|f| f.rust_writer());
         let ser_ext_vars = ext_fields.iter().map(|f| f.rust_writer());
         quote! {
-            let mut __tmp = BytesMut::new(bytes);
+            let __available = bytes.len();
 
-            if __tmp.remaining() < Self::ENCODED_LEN {
+            if __available < Self::ENCODED_LEN {
                 panic!(
                     "buffer is too small (need {} bytes, but got {})",
                     Self::ENCODED_LEN,
-                    __tmp.remaining(),
+                    __available,
                 )
             }
 
+            let mut __tmp: &mut [u8] = bytes;
             #(#ser_vars)*
             if matches!(version, MavlinkVersion::V2) {
                 #(#ser_ext_vars)*
-                let len = __tmp.len();
+                let len = __available - __tmp.len();
                 ::mavlink_core::utils::remove_trailing_zeroes(&bytes[..len])
             } else {
-                __tmp.len()
+                __available - __tmp.len()
             }
         }
     }
@@ -1026,18 +1075,19 @@ impl MavMessage {
                 let avail_len = __input.len();
 
                 let mut payload_buf;
-                let mut buf = if avail_len < Self::ENCODED_LEN {
-                    //copy available bytes into an oversized buffer filled with zeros
-                    payload_buf = [0; Self::ENCODED_LEN];
-                    payload_buf[0..avail_len].copy_from_slice(__input);
-                    Bytes::new(&payload_buf)
+                let mut buf: &[u8] = if let Some(payload) = __input.get(..Self::ENCODED_LEN) {
+                    // Fast zero-copy path for a complete payload.
+                    payload
                 } else {
-                    // fast zero copy
-                    Bytes::new(__input)
+                    // Copy available bytes into a full-sized zero-padded buffer.
+                    payload_buf = [0; Self::ENCODED_LEN];
+                    payload_buf[..avail_len].copy_from_slice(__input);
+                    &payload_buf
                 };
 
                 let mut __struct = Self::default();
                 #(#deser_vars)*
+                debug_assert!(buf.is_empty());
                 Ok(__struct)
             }
         }
@@ -1381,28 +1431,29 @@ impl MavType {
     pub fn rust_reader(&self, val: &TokenStream, buf: Ident) -> TokenStream {
         use self::MavType::*;
         match self {
-            Char => quote! {#val = #buf.get_u8()?;},
-            UInt8 => quote! {#val = #buf.get_u8()?;},
-            UInt16 => quote! {#val = #buf.get_u16_le()?;},
-            UInt32 => quote! {#val = #buf.get_u32_le()?;},
-            UInt64 => quote! {#val = #buf.get_u64_le()?;},
-            UInt8MavlinkVersion => quote! {#val = #buf.get_u8()?;},
-            Int8 => quote! {#val = #buf.get_i8()?;},
-            Int16 => quote! {#val = #buf.get_i16_le()?;},
-            Int32 => quote! {#val = #buf.get_i32_le()?;},
-            Int64 => quote! {#val = #buf.get_i64_le()?;},
-            Float => quote! {#val = #buf.get_f32_le()?;},
-            Double => quote! {#val = #buf.get_f64_le()?;},
+            Char | UInt8 | UInt8MavlinkVersion => {
+                Self::rust_primitive_reader(val, buf, quote!(u8), 1)
+            }
+            UInt16 => Self::rust_primitive_reader(val, buf, quote!(u16), 2),
+            UInt32 => Self::rust_primitive_reader(val, buf, quote!(u32), 4),
+            UInt64 => Self::rust_primitive_reader(val, buf, quote!(u64), 8),
+            Int8 => Self::rust_primitive_reader(val, buf, quote!(i8), 1),
+            Int16 => Self::rust_primitive_reader(val, buf, quote!(i16), 2),
+            Int32 => Self::rust_primitive_reader(val, buf, quote!(i32), 4),
+            Int64 => Self::rust_primitive_reader(val, buf, quote!(i64), 8),
+            Float => Self::rust_primitive_reader(val, buf, quote!(f32), 4),
+            Double => Self::rust_primitive_reader(val, buf, quote!(f64), 8),
             CharArray(size) => {
                 quote! {
-                    let mut tmp = [0_u8; #size];
-                    for v in &mut tmp {
-                        *v = #buf.get_u8()?;
-                    }
-                    #val = CharArray::new(tmp);
+                    #val = CharArray::new(__mavlink_take::<#size>(&mut #buf));
                 }
             }
-            Array(t, _) => {
+            Array(t, size) => {
+                if matches!(**t, Char | UInt8 | UInt8MavlinkVersion) {
+                    return quote! {
+                        #val.copy_from_slice(__mavlink_take_slice(&mut #buf, #size));
+                    };
+                }
                 let r = t.rust_reader(&quote!(let val), buf);
                 quote! {
                     for v in &mut #val {
@@ -1418,27 +1469,19 @@ impl MavType {
     pub fn rust_writer(&self, val: &TokenStream, buf: Ident) -> TokenStream {
         use self::MavType::*;
         match self {
-            UInt8MavlinkVersion => quote! {#buf.put_u8(#val);},
-            UInt8 => quote! {#buf.put_u8(#val);},
-            Char => quote! {#buf.put_u8(#val);},
-            UInt16 => quote! {#buf.put_u16_le(#val);},
-            UInt32 => quote! {#buf.put_u32_le(#val);},
-            Int8 => quote! {#buf.put_i8(#val);},
-            Int16 => quote! {#buf.put_i16_le(#val);},
-            Int32 => quote! {#buf.put_i32_le(#val);},
-            Float => quote! {#buf.put_f32_le(#val);},
-            UInt64 => quote! {#buf.put_u64_le(#val);},
-            Int64 => quote! {#buf.put_i64_le(#val);},
-            Double => quote! {#buf.put_f64_le(#val);},
-            CharArray(_) => {
-                let w = Char.rust_writer(&quote!(*val), buf);
-                quote! {
-                    for val in &#val {
-                        #w
-                    }
+            UInt8MavlinkVersion | UInt8 | Char | Int8 => Self::rust_primitive_writer(val, buf, 1),
+            UInt16 | Int16 => Self::rust_primitive_writer(val, buf, 2),
+            UInt32 | Int32 | Float => Self::rust_primitive_writer(val, buf, 4),
+            UInt64 | Int64 | Double => Self::rust_primitive_writer(val, buf, 8),
+            CharArray(_) => quote! {
+                __mavlink_put_slice(&mut #buf, &(#val)[..]);
+            },
+            Array(t, _) => {
+                if matches!(**t, Char | UInt8 | UInt8MavlinkVersion) {
+                    return quote! {
+                        __mavlink_put_slice(&mut #buf, &(#val)[..]);
+                    };
                 }
-            }
-            Array(t, _size) => {
                 let w = t.rust_writer(&quote!(*val), buf);
                 quote! {
                     for val in &#val {
@@ -1446,6 +1489,23 @@ impl MavType {
                     }
                 }
             }
+        }
+    }
+
+    fn rust_primitive_reader(
+        val: &TokenStream,
+        buf: Ident,
+        ty: TokenStream,
+        size: usize,
+    ) -> TokenStream {
+        quote! {
+            #val = <#ty>::from_le_bytes(__mavlink_take::<#size>(&mut #buf));
+        }
+    }
+
+    fn rust_primitive_writer(val: &TokenStream, buf: Ident, size: usize) -> TokenStream {
+        quote! {
+            __mavlink_put::<#size>(&mut #buf, (#val).to_le_bytes());
         }
     }
 

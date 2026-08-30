@@ -6,14 +6,37 @@
 ///
 /// There must always be at least one remaining byte even if it is a
 /// zero byte.
+#[inline]
 pub fn remove_trailing_zeroes(data: &[u8]) -> usize {
-    let mut len = data.len();
-
-    while len > 1 && data[len - 1] == 0 {
-        len -= 1;
+    let len = data.len();
+    if len <= 1 || data[len - 1] != 0 {
+        return len;
     }
 
-    len
+    find_last_nonzero_by_word(data).max(1)
+}
+
+fn find_last_nonzero_by_word(data: &[u8]) -> usize {
+    let mut start = data.len();
+    let mut chunks = data.rchunks_exact(8);
+    for chunk in &mut chunks {
+        start -= 8;
+        let word = u64::from_le_bytes(
+            chunk
+                .try_into()
+                .expect("an exact eight-byte chunk always has length eight"),
+        );
+        if word != 0 {
+            let significant_bytes = (u64::BITS - word.leading_zeros()).div_ceil(8) as usize;
+            return start + significant_bytes;
+        }
+    }
+
+    chunks
+        .remainder()
+        .iter()
+        .rposition(|&byte| byte != 0)
+        .map_or(0, |index| index + 1)
 }
 
 /// A trait very similar to [`Default`] but is only implemented for the equivalent Rust types to
@@ -62,8 +85,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_remove_trailing_zeroes_empty_slice() {
-        remove_trailing_zeroes(&[]);
+    fn trailing_zero_trim_matches_byte_reference() {
+        let mut bytes = [0; 255];
+        assert_eq!(remove_trailing_zeroes(&[]), 0);
+
+        for length in 1..=bytes.len() {
+            assert_eq!(remove_trailing_zeroes(&bytes[..length]), 1);
+            assert_eq!(find_last_nonzero_by_word(&bytes[..length]), 0);
+
+            for last_nonzero in 0..length {
+                bytes[last_nonzero] = 0xa5;
+                let expected = last_nonzero + 1;
+                assert_eq!(remove_trailing_zeroes(&bytes[..length]), expected);
+                assert_eq!(find_last_nonzero_by_word(&bytes[..length]), expected);
+
+                bytes[last_nonzero] = 0;
+            }
+        }
+    }
+
+    #[test]
+    fn trailing_zero_trim_accepts_unaligned_slices() {
+        let mut storage = [0; 255 + 32];
+        for offset in 0..32 {
+            let data = &mut storage[offset..offset + 255];
+            data.fill(0);
+            data[63] = 1;
+            assert_eq!(remove_trailing_zeroes(data), 64);
+        }
     }
 }
 

@@ -99,15 +99,7 @@ use serde::{Deserialize, Serialize};
 pub mod peek_reader;
 use peek_reader::PeekReader;
 
-use crate::{
-    bytes::Bytes,
-    error::{MessageReadError, MessageWriteError, ParserError},
-};
-
-#[doc(hidden)]
-pub mod bytes;
-#[doc(hidden)]
-pub mod bytes_mut;
+use crate::error::{BufferError, MessageReadError, MessageWriteError, ParserError};
 #[cfg(any(feature = "std", feature = "tokio"))]
 mod connection;
 pub mod consts;
@@ -190,6 +182,12 @@ where
     ///
     /// Will panic if the buffer provided is to small to store this message
     fn ser(&self, version: MavlinkVersion, bytes: &mut [u8]) -> usize;
+
+    /// Serializes the message and returns its encoded length, message ID, and
+    /// `CRC_EXTRA` byte together.
+    ///
+    /// Implementations should obtain all three values with one enum dispatch.
+    fn ser_with_metadata(&self, version: MavlinkVersion, bytes: &mut [u8]) -> (usize, u32, u8);
 
     /// Parse a Message from its message id and payload bytes
     ///
@@ -301,47 +299,35 @@ impl<M: Message> MavFrame<M> {
     /// - If the frame does not fit in the provided buffer
     /// - When attempting to serialize a message with an id greater then 255 with MAVLink 1
     pub fn ser(&self, buf: &mut [u8]) -> usize {
-        let mut buf = bytes_mut::BytesMut::new(buf);
-
-        // Currently expects a buffer with the sequence field at the start.
-        // If this is updated to include the initial packet marker, length field, and flags,
-        // uncomment.
-        //
-        // match self.protocol_version {
-        //     MavlinkVersion::V2 => {
-        //         buf.put_u8(MAV_STX_V2);
-        //         buf.put_u8(payload_len as u8);
-        //         but.put_u8(0); // incompatibility flags
-        //         buf.put_u8(0); // compatibility flags
-        //     }
-        //     MavlinkVersion::V1 => {
-        //         buf.put_u8(MAV_STX);
-        //         buf.put_u8(payload_len as u8);
-        //     }
-        // }
-
-        // serialize header
-        buf.put_slice(&[
+        let message_id = self.msg.message_id();
+        let message_id_len = match self.protocol_version {
+            MavlinkVersion::V2 => 3,
+            MavlinkVersion::V1 => 1,
+        };
+        let header_len = 3 + message_id_len;
+        let (header, payload) = buf.split_at_mut(header_len);
+        header[..3].copy_from_slice(&[
             self.header.sequence,
             self.header.system_id,
             self.header.component_id,
         ]);
 
-        // message id
         match self.protocol_version {
-            MavlinkVersion::V2 => buf.put_u24_le(self.msg.message_id()),
-            MavlinkVersion::V1 => buf.put_u8(
-                self.msg
-                    .message_id()
-                    .try_into()
-                    .expect("message is MAVLink 2 only"),
-            ),
+            MavlinkVersion::V2 => {
+                assert!(
+                    message_id <= 0x00ff_ffff,
+                    "message ID {message_id} exceeds MAVLink 2's 24-bit field"
+                );
+                header[3..].copy_from_slice(&message_id.to_le_bytes()[..3]);
+            }
+            MavlinkVersion::V1 => {
+                header[3] = message_id.try_into().expect("message is MAVLink 2 only");
+            }
         }
 
-        let header_len = buf.len();
         // Serialize the payload straight into the destination buffer right after
         // the header and avoid an intermediate buffer and an extra copy.
-        let payload_len = self.msg.ser(self.protocol_version, &mut buf[header_len..]);
+        let payload_len = self.msg.ser(self.protocol_version, payload);
 
         header_len + payload_len
     }
@@ -352,35 +338,41 @@ impl<M: Message> MavFrame<M> {
     ///
     /// # Errors
     ///
-    /// Will return a [`ParserError`] if a message was found but could not be parsed
-    /// or the if the buffer provided does not contain a full message
+    /// Returns a [`ParserError`] when the header or message ID is incomplete,
+    /// or when the message payload cannot be parsed. Generated message parsers
+    /// zero-fill omitted trailing payload bytes, matching MAVLink 2's trailing
+    /// zero truncation and the crate's existing MAVLink 1 behavior.
     pub fn deser(version: MavlinkVersion, input: &[u8]) -> Result<Self, ParserError> {
-        let mut buf = Bytes::new(input);
-
-        // Currently expects a buffer with the sequence field at the start.
-        // If this is updated to include the initial packet marker, length field, and flags,
-        // uncomment.
-        // <https://mavlink.io/en/guide/serialization.html#mavlink2_packet_format>
-        // match version {
-        //     MavlinkVersion::V2 => buf.get_u32_le(),
-        //     MavlinkVersion::V1 => buf.get_u16_le().into(),
-        // };
-
-        let sequence = buf.get_u8()?;
-        let system_id = buf.get_u8()?;
-        let component_id = buf.get_u8()?;
+        let header = input.get(..3).ok_or_else(|| BufferError::new(1, 0))?;
+        let sequence = header[0];
+        let system_id = header[1];
+        let component_id = header[2];
         let header = MavHeader {
             system_id,
             component_id,
             sequence,
         };
 
+        let input = &input[3..];
         let msg_id = match version {
-            MavlinkVersion::V2 => buf.get_u24_le()?,
-            MavlinkVersion::V1 => buf.get_u8()?.into(),
+            MavlinkVersion::V2 => {
+                let id = input
+                    .get(..3)
+                    .ok_or_else(|| BufferError::new(3, input.len()))?;
+                u32::from_le_bytes([id[0], id[1], id[2], 0])
+            }
+            MavlinkVersion::V1 => u32::from(
+                *input
+                    .first()
+                    .ok_or_else(|| BufferError::new(1, input.len()))?,
+            ),
         };
+        let payload = &input[match version {
+            MavlinkVersion::V2 => 3,
+            MavlinkVersion::V1 => 1,
+        }..];
 
-        M::parse(version, msg_id, buf.remaining_bytes()).map(|msg| Self {
+        M::parse(version, msg_id, payload).map(|msg| Self {
             header,
             msg,
             protocol_version: version,
@@ -753,15 +745,10 @@ impl MAVLinkV1MessageRaw {
     pub fn serialize_message<M: Message>(&mut self, header: MavHeader, message: &M) {
         let payload_offset = consts::STX_SIZE + consts::v1::HEADER_SIZE;
         let payload_buf = &mut self.0[payload_offset..(payload_offset + consts::MAX_PAYLOAD_LEN)];
-        let payload_length = message.ser(MavlinkVersion::V1, payload_buf);
+        let (payload_length, message_id, extra_crc) =
+            message.ser_with_metadata(MavlinkVersion::V1, payload_buf);
 
-        let message_id = message.message_id();
-        self.serialize_stx_and_header_and_crc(
-            header,
-            message_id,
-            payload_length,
-            M::extra_crc(message_id),
-        );
+        self.serialize_stx_and_header_and_crc(header, message_id, payload_length, extra_crc);
     }
 
     /// # Panics
@@ -1321,16 +1308,9 @@ impl MAVLinkV2MessageRaw {
     pub fn serialize_message<M: Message>(&mut self, header: MavHeader, message: &M) {
         let payload_offset = consts::STX_SIZE + consts::v2::HEADER_SIZE;
         let payload_buf = &mut self.0[payload_offset..(payload_offset + consts::MAX_PAYLOAD_LEN)];
-        let payload_length = message.ser(MavlinkVersion::V2, payload_buf);
-
-        let message_id = message.message_id();
-        self.serialize_stx_and_header_and_crc(
-            header,
-            message_id,
-            payload_length,
-            M::extra_crc(message_id),
-            0,
-        );
+        let (payload_length, message_id, extra_crc) =
+            message.ser_with_metadata(MavlinkVersion::V2, payload_buf);
+        self.serialize_stx_and_header_and_crc(header, message_id, payload_length, extra_crc, 0);
     }
 
     /// Serialize a [Message] with a given header into this raw message buffer and sets the `consts::v2::IFLAG_SIGNED` incompatiblity flag.
@@ -1340,14 +1320,13 @@ impl MAVLinkV2MessageRaw {
     pub fn serialize_message_for_signing<M: Message>(&mut self, header: MavHeader, message: &M) {
         let payload_offset = consts::STX_SIZE + consts::v2::HEADER_SIZE;
         let payload_buf = &mut self.0[payload_offset..(payload_offset + consts::MAX_PAYLOAD_LEN)];
-        let payload_length = message.ser(MavlinkVersion::V2, payload_buf);
-
-        let message_id = message.message_id();
+        let (payload_length, message_id, extra_crc) =
+            message.ser_with_metadata(MavlinkVersion::V2, payload_buf);
         self.serialize_stx_and_header_and_crc(
             header,
             message_id,
             payload_length,
-            M::extra_crc(message_id),
+            extra_crc,
             consts::v2::IFLAG_SIGNED,
         );
     }

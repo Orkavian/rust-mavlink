@@ -1,7 +1,37 @@
-use crate::bytes;
 use core::fmt::{Display, Formatter};
 #[cfg(feature = "std")]
 use std::error::Error;
+
+/// A byte slice did not contain enough data for a wire-format value.
+///
+/// This type is intentionally independent of any cursor or I/O abstraction so
+/// it remains usable in allocation-free and `no_std` builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferError {
+    /// The input ended before the requested value could be read.
+    UnexpectedEnd {
+        /// Number of bytes required for the value being read.
+        needed: usize,
+        /// Number of bytes available at the read position.
+        remaining: usize,
+    },
+}
+
+impl BufferError {
+    pub(crate) const fn new(needed: usize, remaining: usize) -> Self {
+        Self::UnexpectedEnd { needed, remaining }
+    }
+}
+
+impl Display for BufferError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::UnexpectedEnd { needed, remaining } => {
+                write!(f, "needed {needed} bytes but only {remaining} remain")
+            }
+        }
+    }
+}
 
 /// Error while parsing a MAVLink message
 #[derive(Debug)]
@@ -10,13 +40,13 @@ pub enum ParserError {
     InvalidEnum { enum_type: &'static str, value: u64 },
     /// Message ID does not exist in this message set
     UnknownMessage { id: u32 },
-    /// Errors that occurred in the bytes module.
-    BytesError(bytes::Error),
+    /// The input buffer ended before a complete value could be read.
+    BufferError(BufferError),
 }
 
-impl From<bytes::Error> for ParserError {
-    fn from(error: bytes::Error) -> Self {
-        Self::BytesError(error)
+impl From<BufferError> for ParserError {
+    fn from(error: BufferError) -> Self {
+        Self::BufferError(error)
     }
 }
 
@@ -28,7 +58,7 @@ impl Display for ParserError {
                 "Invalid enum value for enum type {enum_type:?}, got {value:?}"
             ),
             Self::UnknownMessage { id } => write!(f, "Unknown message with ID {id:?}"),
-            Self::BytesError(error) => write!(f, "{error}"),
+            Self::BufferError(error) => write!(f, "{error}"),
         }
     }
 }

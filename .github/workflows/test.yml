@@ -31,8 +31,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri,rust-src
-      - name: Run Miri
-        run: cargo miri test --package mavlink-crc --all-features
+      - name: Run x86 accelerated backend with Miri
+        env:
+          RUSTFLAGS: -C target-feature=+pclmulqdq,+sse2
+          RUSTDOCFLAGS: -C target-feature=+pclmulqdq,+sse2
+        run: >-
+          cargo miri test --target x86_64-unknown-linux-gnu
+          --package mavlink-crc --all-features
+      - name: Run AArch64 accelerated backend with Miri
+        env:
+          RUSTFLAGS: -C target-feature=+aes
+          RUSTDOCFLAGS: -C target-feature=+aes
+        run: >-
+          cargo miri test --target aarch64-unknown-linux-gnu
+          --package mavlink-crc --all-features
       - name: Run accelerated backend with AddressSanitizer
         env:
           ASAN_OPTIONS: detect_leaks=0

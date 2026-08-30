@@ -12,10 +12,10 @@ extern crate std;
 mod backend;
 mod scalar;
 
-#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[cfg(target_arch = "aarch64")]
 mod aarch64;
 
-#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)))]
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod x86;
 
 /// CRC-16/MCRF4XX initial value used by MAVLink.
@@ -263,5 +263,34 @@ mod tests {
                 assert_eq!(digest.finalize(), reference(INITIAL, bytes));
             }
         }
+    }
+
+    #[cfg(miri)]
+    fn check_accelerated_backend(update_backend: fn(u16, &[u8]) -> Option<u16>) {
+        const LENGTHS: &[usize] = &[
+            64, 65, 79, 80, 95, 96, 112, 127, 128, 129, 191, 192, 255, 256, 265,
+        ];
+
+        let data = data();
+        for &length in LENGTHS {
+            let bytes = &data[..length];
+            for initial in [0, 1, 0x5555, INITIAL] {
+                let actual = update_backend(initial, bytes)
+                    .expect("the accelerated backend must be enabled in Miri CI");
+                assert_eq!(actual, reference(initial, bytes));
+            }
+        }
+    }
+
+    #[cfg(all(miri, any(target_arch = "x86", target_arch = "x86_64")))]
+    #[test]
+    fn miri_checks_x86_accelerated_backend() {
+        check_accelerated_backend(crate::x86::update_if_supported);
+    }
+
+    #[cfg(all(miri, target_arch = "aarch64"))]
+    #[test]
+    fn miri_checks_aarch64_accelerated_backend() {
+        check_accelerated_backend(crate::aarch64::update_if_supported);
     }
 }

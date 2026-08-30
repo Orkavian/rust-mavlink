@@ -15,6 +15,9 @@ rust-version = "1.85.0"
 keywords = ["mavlink", "parser", "protocol", "embedded"]
 categories = ["aerospace", "aerospace::protocols", "parsing", "embedded"]
 
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
 [workspace.lints.clippy]
 cargo = { level = "warn", priority = -1 }
 multiple_crate_versions  = "allow"

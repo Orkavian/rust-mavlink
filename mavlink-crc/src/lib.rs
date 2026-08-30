@@ -154,6 +154,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "the dedicated Miri boundary test covers this exhaustive native test"
+    )]
     fn every_generated_table_entry_matches_bitwise_reference() {
         // `black_box` makes the const-capable generator execute at runtime too,
         // so coverage includes the code that creates the production tables.
@@ -172,6 +176,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "the dedicated Miri boundary test covers this exhaustive native test"
+    )]
     fn every_mavlink_length_and_extra_byte_matches_reference() {
         let data = data();
         for length in 0..=265 {
@@ -183,6 +191,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "the dedicated Miri boundary test covers this exhaustive native test"
+    )]
     fn streaming_matches_every_split() {
         let data = data();
         for length in 0..=265 {
@@ -201,6 +213,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "the dedicated Miri boundary test covers this exhaustive native test"
+    )]
     fn scalar_chunk_boundaries_match_reference() {
         let data = data();
         for length in 0..=data.len() {
@@ -221,5 +237,31 @@ mod tests {
         let copy = digest;
         assert_eq!(copy.finalize(), reference_byte(INITIAL, 42));
         assert!(std::format!("{digest:?}").contains("Digest"));
+    }
+
+    #[cfg(miri)]
+    #[test]
+    fn miri_checks_public_api_boundaries() {
+        const LENGTHS: &[usize] = &[
+            0, 1, 4, 5, 6, 7, 8, 9, 10, 13, 14, 15, 16, 31, 32, 47, 48, 63, 64, 65, 127, 128, 129,
+            255, 265,
+        ];
+        const EXTRA_CRC_VALUES: &[u8] = &[0, 1, 50, u8::MAX];
+
+        let data = data();
+        for &length in LENGTHS {
+            let bytes = &data[..length];
+            for &extra_crc in EXTRA_CRC_VALUES {
+                let expected = reference_byte(reference(INITIAL, bytes), extra_crc);
+                assert_eq!(calculate(bytes, extra_crc), expected);
+            }
+
+            for split in [0, length / 2, length] {
+                let mut digest = Digest::new();
+                digest.update(&bytes[..split]);
+                digest.update(&bytes[split..]);
+                assert_eq!(digest.finalize(), reference(INITIAL, bytes));
+            }
+        }
     }
 }

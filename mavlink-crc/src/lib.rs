@@ -12,6 +12,9 @@ extern crate std;
 mod backend;
 mod scalar;
 
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+mod aarch64;
+
 #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)))]
 mod x86;
 

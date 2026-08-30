@@ -13,5 +13,10 @@ pub(crate) fn update(initial: u16, bytes: &[u8]) -> u16 {
         return crc;
     }
 
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    if let Some(crc) = crate::aarch64::update_if_supported(initial, bytes) {
+        return crc;
+    }
+
     scalar::update(initial, bytes)
 }

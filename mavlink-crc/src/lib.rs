@@ -9,7 +9,11 @@
 #[cfg(feature = "std")]
 extern crate std;
 
+mod backend;
 mod scalar;
+
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)))]
+mod x86;
 
 /// CRC-16/MCRF4XX initial value used by MAVLink.
 pub const INITIAL: u16 = 0xffff;
@@ -91,7 +95,11 @@ impl Default for Digest {
 
 #[inline]
 fn update(initial: u16, bytes: &[u8]) -> u16 {
-    scalar::update(initial, bytes)
+    if bytes.len() < LONG_MESSAGE_MINIMUM {
+        scalar::update(initial, bytes)
+    } else {
+        backend::update(initial, bytes)
+    }
 }
 
 #[cfg(test)]

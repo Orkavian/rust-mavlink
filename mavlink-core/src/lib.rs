@@ -104,8 +104,6 @@ use crate::{
     error::{MessageReadError, MessageWriteError, ParserError},
 };
 
-use crc_any::CRCu16;
-
 #[doc(hidden)]
 pub mod bytes;
 #[doc(hidden)]
@@ -397,11 +395,7 @@ impl<M: Message> MavFrame<M> {
 
 /// Calculates the [CRC checksum](https://mavlink.io/en/guide/serialization.html#checksum) of a messages header, payload and the CRC_EXTRA byte.
 pub fn calculate_crc(data: &[u8], extra_crc: u8) -> u16 {
-    let mut crc_calculator = CRCu16::crc16mcrf4cc();
-    crc_calculator.digest(data);
-
-    crc_calculator.digest(&[extra_crc]);
-    crc_calculator.get_crc()
+    mavlink_crc::calculate(data, extra_crc)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

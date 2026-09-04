@@ -1,0 +1,30 @@
+[package]
+name = "file-reader-benchmark"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.85"
+
+[workspace]
+
+[dependencies.mavlink-after]
+package = "mavlink"
+path = "../../mavlink"
+default-features = false
+features = ["std", "tokio", "dialect-ardupilotmega"]
+
+[dependencies.mavlink-before]
+package = "mavlink"
+git = "https://github.com/mavlink/rust-mavlink.git"
+rev = "ac3491fd415b15f0f89cf8523d38c2bf42399c50"
+default-features = false
+features = ["std", "tokio", "dialect-ardupilotmega"]
+
+[dependencies.tokio]
+version = "1.0"
+default-features = false
+features = ["rt"]
+
+[[bench]]
+name = "file_reader"
+harness = false
